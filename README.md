@@ -13,6 +13,11 @@ Aplicação Flask independente para o módulo TAR e o ARTIGO BETA.
 - `/tar/export-report.pdf`
 - `/healthz`
 
+Parâmetros opcionais:
+
+- `stat_n=60`
+- `stat_seed=20260504`
+
 ## Execução local
 
 ```powershell
@@ -37,4 +42,4 @@ waitress-serve --host=0.0.0.0 --port=$PORT wsgi:application
 Variáveis esperadas:
 
 - `TAR_WORKBOOK_PATH=./Cópia de TAR.xlsx`
-- `TAR_ARTICLE_PATH=./Artigo TAR.docx`
+- `TAR_ARTICLE_PATH=./Artigo TAR1 correção.pdf`

@@ -13,4 +13,4 @@ services:
       - key: TAR_WORKBOOK_PATH
         value: ./Cópia de TAR.xlsx
       - key: TAR_ARTICLE_PATH
-        value: ./Artigo TAR.docx
+        value: ./Artigo TAR1 correção.pdf

@@ -76,6 +76,21 @@ DEFAULT_SENSITIVITY_N = 10000
 DEFAULT_SENSITIVITY_SEED = 20260504
 DEFAULT_TAR_ACTIVITY_BQ_YEAR = 2.69e11
 DEFAULT_DILUTION_FLOW_M3_YEAR = 2.96e9
+DEFAULT_STAT_N = 60
+DEFAULT_STAT_SEED = 20260504
+
+ERICA_TOOL_VALUES: dict[str, dict[str, float | None]] = {
+    # Fonte: tabela/screenshot do ERICA Tool no arquivo "Artigo TAR1 correção.pdf".
+    # Água foi extraída em Bq/L no ERICA Tool e convertida para Bq/m³ para comparação com a planilha.
+    "Co-58": {"water": 1.85e-2 * 1000.0, "fish": 6.30e1, "invertebrate": 4.47e1, "sediment": 3.27e0},
+    "Co-60": {"water": 8.30e-4 * 1000.0, "fish": 2.94e0, "invertebrate": 2.81e0, "sediment": 3.91e0},
+    "Cr-51": {"water": 4.08e-3 * 1000.0, "fish": 2.35e-1, "invertebrate": 4.27e-1, "sediment": 2.80e-1},
+    "Cs-137": {"water": 8.69e-5 * 1000.0, "fish": 7.09e-3, "invertebrate": 5.32e-3, "sediment": 1.19e0},
+    "Mn-54": {"water": 1.95e-4 * 1000.0, "fish": 1.59e0, "invertebrate": 1.04e0, "sediment": 1.52e-1},
+    "Sb-124": {"water": 5.18e-4 * 1000.0, "fish": 1.00e-3, "invertebrate": 6.40e-2, "sediment": 7.78e-2},
+    "Sb-125": {"water": 1.41e-4 * 1000.0, "fish": 3.97e-4, "invertebrate": 2.55e-2, "sediment": 3.55e-1},
+    "Zr-95": {"water": 6.66e-5 * 1000.0, "fish": 3.88e-3, "invertebrate": 2.15e-3, "sediment": 5.31e-3},
+}
 
 
 def resolve_tar_scenario_key(value: Any) -> str:
@@ -147,6 +162,8 @@ def _summary_stats(values: list[float]) -> dict[str, Any]:
         return {
             "n": 0,
             "mean": None,
+            "stdev": None,
+            "cv": None,
             "q1": None,
             "median": None,
             "q3": None,
@@ -156,9 +173,13 @@ def _summary_stats(values: list[float]) -> dict[str, Any]:
         }
     ordered = sorted(values)
     quartiles = statistics.quantiles(ordered, n=4, method="inclusive") if len(ordered) > 1 else [ordered[0], ordered[0], ordered[0]]
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
     return {
         "n": len(values),
-        "mean": statistics.fmean(values),
+        "mean": mean,
+        "stdev": stdev,
+        "cv": stdev / mean if mean else None,
         "q1": quartiles[0],
         "median": statistics.median(values),
         "q3": quartiles[2],
@@ -612,6 +633,319 @@ def _build_sensitivity_analysis(scenario: dict[str, Any], *, sample_count: int, 
     }
 
 
+def _stat_text(value: float | None, *, digits: int = 4) -> str:
+    return _format_decimal(value, digits=digits)
+
+
+def _stats_summary_with_text(values: list[float]) -> dict[str, Any]:
+    summary = _summary_stats(values)
+    return {
+        **summary,
+        "mean_text": _format_scientific(summary["mean"]),
+        "stdev_text": _format_scientific(summary["stdev"]),
+        "cv_text": _format_percent(summary["cv"]),
+        "q1_text": _format_scientific(summary["q1"]),
+        "median_text": _format_scientific(summary["median"]),
+        "q3_text": _format_scientific(summary["q3"]),
+        "p95_text": _format_scientific(summary["p95"]),
+        "min_text": _format_scientific(summary["min"]),
+        "max_text": _format_scientific(summary["max"]),
+    }
+
+
+def _synthetic_replicates(base_value: float | None, count: int, rng: random.Random) -> list[float]:
+    if base_value is None or base_value <= 0:
+        return []
+    sigma = 0.20
+    mu = math.log(base_value) - (sigma * sigma / 2.0)
+    return [rng.lognormvariate(mu, sigma) for _ in range(count)]
+
+
+def _reference_test(values: list[float], reference: float | None, reference_label: str, dataset_label: str) -> dict[str, Any]:
+    if not values or reference is None or reference <= 0:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": f"Sem {reference_label} numérico para {dataset_label}.",
+        }
+    ratios = [value / reference for value in values if value > 0]
+    if len(ratios) < 3:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": "Menos de 3 replicações sintéticas exploratórias válidas.",
+            "n": len(ratios),
+        }
+
+    log_ratios = [math.log(ratio) for ratio in ratios]
+    shapiro_w = None
+    shapiro_p = None
+    try:
+        shapiro = stats.shapiro(log_ratios)
+        shapiro_w = float(shapiro.statistic)
+        shapiro_p = float(shapiro.pvalue)
+    except Exception:
+        pass
+
+    normality_met = shapiro_p is not None and shapiro_p >= 0.05
+    if normality_met:
+        test_label = "Teste t unilateral de uma amostra"
+        try:
+            test = stats.ttest_1samp(log_ratios, popmean=0.0, alternative="less")
+            statistic = float(test.statistic)
+            p_value = float(test.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+    else:
+        test_label = "Wilcoxon unilateral de uma amostra"
+        try:
+            test = stats.wilcoxon(log_ratios, alternative="less", zero_method="pratt")
+            statistic = float(test.statistic)
+            p_value = float(test.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+
+    ratio_summary = _stats_summary_with_text(ratios)
+    exceedance_count = sum(1 for ratio in ratios if ratio > 1.0)
+    conclusion = (
+        f"{dataset_label} ficou abaixo de {reference_label} nas replicações sintéticas exploratórias"
+        if p_value is not None and p_value < 0.05 and (ratio_summary["p95"] or 0) < 1.0
+        else f"{dataset_label} não sustenta margem estatística exploratória abaixo de {reference_label}"
+    )
+    return {
+        "applicable": p_value is not None,
+        "n": len(ratios),
+        "test_label": test_label,
+        "statistic": statistic,
+        "statistic_text": _stat_text(statistic),
+        "p_value": p_value,
+        "p_value_text": _format_p_value(p_value),
+        "shapiro_w": shapiro_w,
+        "shapiro_p": shapiro_p,
+        "shapiro_p_text": _format_p_value(shapiro_p),
+        "normality_met": normality_met,
+        "ratio_summary": ratio_summary,
+        "p95_ratio": ratio_summary["p95"],
+        "p95_ratio_text": _stat_text(ratio_summary["p95"]),
+        "exceedance_count": exceedance_count,
+        "exceedance_rate": exceedance_count / len(ratios) if ratios else None,
+        "exceedance_rate_text": _format_percent(exceedance_count / len(ratios) if ratios else None),
+        "conclusion": conclusion,
+    }
+
+
+def _paired_calculated_erica_test(calculated_values: list[float], erica_values: list[float]) -> dict[str, Any]:
+    pairs = [
+        (calculated, erica)
+        for calculated, erica in zip(calculated_values, erica_values)
+        if calculated > 0 and erica > 0
+    ]
+    if len(pairs) < 3:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": "Menos de 3 pares sintéticos exploratórios válidos.",
+            "n": len(pairs),
+        }
+    log_ratios = [math.log(calculated / erica) for calculated, erica in pairs]
+    shapiro_w = None
+    shapiro_p = None
+    try:
+        shapiro = stats.shapiro(log_ratios)
+        shapiro_w = float(shapiro.statistic)
+        shapiro_p = float(shapiro.pvalue)
+    except Exception:
+        pass
+    normality_met = shapiro_p is not None and shapiro_p >= 0.05
+    if normality_met:
+        test_label = "Teste t pareado sobre log(calculado/ERICA)"
+        try:
+            test = stats.ttest_1samp(log_ratios, popmean=0.0, alternative="two-sided")
+            statistic = float(test.statistic)
+            p_value = float(test.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+    else:
+        test_label = "Wilcoxon pareado sobre log(calculado/ERICA)"
+        try:
+            test = stats.wilcoxon(log_ratios, alternative="two-sided", zero_method="pratt")
+            statistic = float(test.statistic)
+            p_value = float(test.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+
+    mean_log = statistics.fmean(log_ratios)
+    stdev_log = statistics.stdev(log_ratios) if len(log_ratios) > 1 else 0.0
+    ci_half_width = 1.96 * stdev_log / math.sqrt(len(log_ratios)) if len(log_ratios) > 1 else 0.0
+    ratios = [math.exp(value) for value in log_ratios]
+    return {
+        "applicable": p_value is not None,
+        "n": len(log_ratios),
+        "test_label": test_label,
+        "statistic": statistic,
+        "statistic_text": _stat_text(statistic),
+        "p_value": p_value,
+        "p_value_text": _format_p_value(p_value),
+        "shapiro_w": shapiro_w,
+        "shapiro_p": shapiro_p,
+        "shapiro_p_text": _format_p_value(shapiro_p),
+        "normality_met": normality_met,
+        "mean_log_ratio": mean_log,
+        "mean_log_ratio_text": _stat_text(mean_log),
+        "mean_ratio": math.exp(mean_log),
+        "mean_ratio_text": _stat_text(math.exp(mean_log)),
+        "median_ratio": statistics.median(ratios),
+        "median_ratio_text": _stat_text(statistics.median(ratios)),
+        "ci95_low": math.exp(mean_log - ci_half_width),
+        "ci95_low_text": _stat_text(math.exp(mean_log - ci_half_width)),
+        "ci95_high": math.exp(mean_log + ci_half_width),
+        "ci95_high_text": _stat_text(math.exp(mean_log + ci_half_width)),
+        "conclusion": "Comparação exploratória entre cálculo por fórmula e ERICA Tool; não constitui validação regulatória final.",
+    }
+
+
+def _erica_value(radionuclide: str, compartment_key: str) -> float | None:
+    return (ERICA_TOOL_VALUES.get(radionuclide) or {}).get(compartment_key)
+
+
+def _build_statistical_comparison(scenario: dict[str, Any], *, sample_count: int, seed: int) -> dict[str, Any]:
+    calculated_rows: list[dict[str, Any]] = []
+    erica_rows: list[dict[str, Any]] = []
+    norm_rows: list[dict[str, Any]] = []
+    descriptive_rows: list[dict[str, Any]] = []
+    inferential_rows: list[dict[str, Any]] = []
+    paired_comparison_rows: list[dict[str, Any]] = []
+
+    for row in scenario.get("rows") or []:
+        radionuclide = row["radionuclide"]
+        for compartment in COMPARTMENTS:
+            key = compartment["key"]
+            data = row["compartments"][key]
+            calculated_value = data.get("value")
+            erica_value = _erica_value(radionuclide, key)
+            calculated_rows.append(
+                {
+                    "dataset": "calculado",
+                    "radionuclide": radionuclide,
+                    "compartment_key": key,
+                    "compartment": compartment["label"],
+                    "unit": compartment["unit"],
+                    "value": calculated_value,
+                    "value_text": _format_scientific(calculated_value),
+                    "method": "Fórmulas de transporte/incorporação da planilha TAR",
+                }
+            )
+            erica_rows.append(
+                {
+                    "dataset": "ERICA Tool",
+                    "radionuclide": radionuclide,
+                    "compartment_key": key,
+                    "compartment": compartment["label"],
+                    "unit": compartment["unit"],
+                    "value": erica_value,
+                    "value_text": _format_scientific(erica_value),
+                    "method": "ERICA Tool Nível 2; valores extraídos do PDF corrigido",
+                }
+            )
+            for reference_key, reference_label in (("report_level", "Report Level"), ("lld", "LLD")):
+                reference_value = data.get(reference_key)
+                if reference_value is None:
+                    continue
+                norm_rows.append(
+                    {
+                        "radionuclide": radionuclide,
+                        "compartment_key": key,
+                        "compartment": compartment["label"],
+                        "reference": reference_label,
+                        "unit": compartment["unit"],
+                        "value": reference_value,
+                        "value_text": _format_scientific(reference_value),
+                    }
+                )
+
+            for dataset_key, dataset_label, base_value in (
+                ("calculado", "Calculado por fórmulas", calculated_value),
+                ("erica", "Simulado pelo ERICA Tool", erica_value),
+            ):
+                rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:{dataset_key}")
+                replicates = _synthetic_replicates(base_value, sample_count, rng)
+                if replicates:
+                    descriptive_rows.append(
+                        {
+                            "dataset": dataset_label,
+                            "radionuclide": radionuclide,
+                            "compartment_key": key,
+                            "compartment": compartment["label"],
+                            "unit": compartment["unit"],
+                            "base_value": base_value,
+                            "base_value_text": _format_scientific(base_value),
+                            **_stats_summary_with_text(replicates),
+                        }
+                    )
+                for reference_key, reference_label in (("report_level", "Report Level"), ("lld", "LLD")):
+                    reference_value = data.get(reference_key)
+                    if reference_value is None or not replicates:
+                        continue
+                    test_result = _reference_test(replicates, reference_value, reference_label, dataset_label)
+                    test_result.update(
+                        {
+                            "dataset": dataset_label,
+                            "radionuclide": radionuclide,
+                            "compartment_key": key,
+                            "compartment": compartment["label"],
+                            "reference": reference_label,
+                            "reference_value": reference_value,
+                            "reference_value_text": _format_scientific(reference_value),
+                        }
+                    )
+                    inferential_rows.append(test_result)
+
+            calculated_rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:paired:calculated")
+            erica_rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:paired:erica")
+            calculated_replicates = _synthetic_replicates(calculated_value, sample_count, calculated_rng)
+            erica_replicates = _synthetic_replicates(erica_value, sample_count, erica_rng)
+            if calculated_replicates and erica_replicates:
+                paired = _paired_calculated_erica_test(calculated_replicates, erica_replicates)
+                paired.update(
+                    {
+                        "radionuclide": radionuclide,
+                        "compartment_key": key,
+                        "compartment": compartment["label"],
+                        "unit": compartment["unit"],
+                        "calculated_value": calculated_value,
+                        "calculated_value_text": _format_scientific(calculated_value),
+                        "erica_value": erica_value,
+                        "erica_value_text": _format_scientific(erica_value),
+                    }
+                )
+                paired_comparison_rows.append(paired)
+
+    narrative_text = (
+        f"A análise estatística usa {sample_count} replicações sintéticas exploratórias por valor base, com seed {seed}. "
+        "Os dados calculados vêm das fórmulas de transporte/incorporação da planilha TAR; os dados simulados vêm do "
+        "ERICA Tool Nível 2; Report Level e LLD permanecem como referências normativas fixas. As replicações não são "
+        "medições reais e não sustentam conclusão regulatória isolada."
+    )
+    return {
+        "sample_count": sample_count,
+        "seed": seed,
+        "synthetic": True,
+        "source_note": "replicações sintéticas exploratórias geradas para análise estatística; não são medições reais.",
+        "erica_source": "Artigo TAR1 correção.pdf, tabela/screenshot do ERICA Tool Nível 2.",
+        "calculated_rows": calculated_rows,
+        "erica_rows": erica_rows,
+        "norm_rows": norm_rows,
+        "descriptive_rows": descriptive_rows,
+        "inferential_rows": inferential_rows,
+        "paired_comparison_rows": paired_comparison_rows,
+        "narrative_text": narrative_text,
+    }
+
+
 def _run_one_sample_limit_test(values: list[float], report_level: float | None) -> dict[str, Any]:
     if not values or report_level is None or report_level <= 0:
         return {
@@ -909,11 +1243,15 @@ def build_tar_summary(
     hypothetical_seed: Any = 20260504,
     sensitivity_n: Any = DEFAULT_SENSITIVITY_N,
     sensitivity_seed: Any = DEFAULT_SENSITIVITY_SEED,
+    stat_n: Any = DEFAULT_STAT_N,
+    stat_seed: Any = DEFAULT_STAT_SEED,
 ) -> dict[str, Any]:
     resolved_n = _safe_int(hypothetical_n, 60, minimum=10, maximum=500)
     resolved_seed = _safe_int(hypothetical_seed, 20260504, minimum=1, maximum=999999999)
     resolved_sensitivity_n = _safe_int(sensitivity_n, DEFAULT_SENSITIVITY_N, minimum=100, maximum=50000)
     resolved_sensitivity_seed = _safe_int(sensitivity_seed, DEFAULT_SENSITIVITY_SEED, minimum=1, maximum=999999999)
+    resolved_stat_n = _safe_int(stat_n, DEFAULT_STAT_N, minimum=10, maximum=5000)
+    resolved_stat_seed = _safe_int(stat_seed, DEFAULT_STAT_SEED, minimum=1, maximum=999999999)
     model = load_tar_workbook_model(
         workbook_path,
         hypothetical_n=resolved_n,
@@ -925,6 +1263,11 @@ def build_tar_summary(
         scenario_model,
         sample_count=resolved_sensitivity_n,
         seed=resolved_sensitivity_seed,
+    )
+    scenario_model["statistical_comparison"] = _build_statistical_comparison(
+        scenario_model,
+        sample_count=resolved_stat_n,
+        seed=resolved_stat_seed,
     )
     return {
         "ok": True,

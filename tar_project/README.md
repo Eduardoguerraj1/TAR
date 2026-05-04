@@ -32,7 +32,7 @@ Exemplo:
 
 Esse cenário não altera a planilha Excel. Ele usa os valores atuais como base, gera medições sintéticas da água do TAR por espectrometria gama e propaga essas entradas para novas simulações.
 
-A análise de sensibilidade usa intervalos sintéticos demonstrativos e multiplicadores simples sobre os resultados atuais. Ela serve para triagem exploratória das variáveis mais influentes e não substitui constantes de literatura nem conclusão regulatória.
+O ARTIGO BETA separa dados calculados por fórmulas, dados simulados pelo ERICA Tool e normas de comparação. As replicações sintéticas exploratórias usadas na estatística servem apenas para atingir N analítico e não substituem medições reais nem conclusão regulatória.
 
 ## Documentação estatística
 

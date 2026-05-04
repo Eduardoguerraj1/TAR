@@ -41,7 +41,7 @@ def json_ready(value: Any) -> Any:
 app = Flask(__name__)
 
 TAR_WORKBOOK_PATH = resolve_config_path("TAR_WORKBOOK_PATH", BASE_DIR / "Cópia de TAR.xlsx")
-TAR_ARTICLE_PATH = resolve_config_path("TAR_ARTICLE_PATH", BASE_DIR / "Artigo TAR.docx")
+TAR_ARTICLE_PATH = resolve_config_path("TAR_ARTICLE_PATH", BASE_DIR / "Artigo TAR1 correção.pdf")
 
 
 def current_tar_summary() -> dict[str, Any]:
@@ -52,6 +52,8 @@ def current_tar_summary() -> dict[str, Any]:
         hypothetical_seed=request.args.get("seed", 20260504),
         sensitivity_n=request.args.get("sensitivity_n", 10000),
         sensitivity_seed=request.args.get("sensitivity_seed", 20260504),
+        stat_n=request.args.get("stat_n", 60),
+        stat_seed=request.args.get("stat_seed", 20260504),
     )
 
 
