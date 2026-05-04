@@ -1,0 +1,939 @@
+from __future__ import annotations
+
+import math
+import random
+import re
+import statistics
+from pathlib import Path
+from typing import Any
+
+import openpyxl
+from scipy import stats
+
+
+class TarWorkbookError(RuntimeError):
+    """Raised when the TAR workbook cannot be loaded into the expected model."""
+
+
+SCENARIOS: dict[str, dict[str, str]] = {
+    "a1": {"key": "a1", "sheet": "A1", "label": "Angra 1"},
+    "a1_a2": {"key": "a1_a2", "sheet": "A1 e A2", "label": "Angra 1 e Angra 2"},
+    "hipotetico": {"key": "hipotetico", "sheet": "", "label": "Cenário hipotético"},
+}
+
+EXPECTED_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54", "Sb-124", "Sb-125", "Zr-95"]
+
+COMPARTMENTS: list[dict[str, Any]] = [
+    {
+        "key": "water",
+        "label": "Água",
+        "unit": "Bq/m³",
+        "value_col": 7,
+        "report_level_col": 19,
+        "lld_col": 18,
+    },
+    {
+        "key": "fish",
+        "label": "Peixe",
+        "unit": "Bq/kg",
+        "value_col": 12,
+        "report_level_col": 21,
+        "lld_col": 20,
+    },
+    {
+        "key": "invertebrate",
+        "label": "Invertebrado",
+        "unit": "Bq/kg",
+        "value_col": 13,
+        "report_level_col": 23,
+        "lld_col": 22,
+    },
+    {
+        "key": "sediment",
+        "label": "Sedimento",
+        "unit": "Bq/kg",
+        "value_col": 16,
+        "report_level_col": 25,
+        "lld_col": 24,
+    },
+]
+
+INFERENTIAL_TEST_MINIMUMS: list[dict[str, str]] = [
+    {"test": "Shapiro-Wilk", "technical_minimum": "n >= 3", "recommended": "n >= 8 a 10 por grupo"},
+    {"test": "Levene", "technical_minimum": "2 grupos, n >= 2 por grupo", "recommended": "n >= 5 por grupo"},
+    {"test": "Teste t pareado", "technical_minimum": "n >= 2 pares", "recommended": "n >= 10 pares; n >= 3 para checar normalidade"},
+    {"test": "Wilcoxon pareado", "technical_minimum": "pares não nulos", "recommended": "n >= 10 pares"},
+    {"test": "Teste t independente", "technical_minimum": "2 grupos, n >= 2 por grupo", "recommended": "n >= 10 por grupo"},
+    {"test": "Mann-Whitney U", "technical_minimum": "2 grupos, n >= 1 por grupo", "recommended": "n >= 5 a 10 por grupo"},
+    {"test": "ANOVA uma via", "technical_minimum": "2+ grupos, n >= 2 por grupo", "recommended": "n >= 5 por grupo"},
+    {"test": "Kruskal-Wallis", "technical_minimum": "2+ grupos", "recommended": "n >= 5 por grupo"},
+    {"test": "ANOVA medidas repetidas", "technical_minimum": "3+ condições e 3+ unidades completas", "recommended": "n >= 10 unidades completas"},
+    {"test": "Friedman", "technical_minimum": "3+ condições pareadas", "recommended": "n >= 10 unidades completas"},
+    {"test": "Pearson/Spearman", "technical_minimum": "n >= 3 pares", "recommended": "n >= 10 a 20 pares"},
+]
+
+DEFAULT_SENSITIVITY_N = 10000
+DEFAULT_SENSITIVITY_SEED = 20260504
+DEFAULT_TAR_ACTIVITY_BQ_YEAR = 2.69e11
+DEFAULT_DILUTION_FLOW_M3_YEAR = 2.96e9
+
+
+def resolve_tar_scenario_key(value: Any) -> str:
+    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "a1",
+        "angra_1": "a1",
+        "angra1": "a1",
+        "a1": "a1",
+        "a1ea2": "a1_a2",
+        "a1_e_a2": "a1_a2",
+        "a1_a2": "a1_a2",
+        "angra_1_e_2": "a1_a2",
+        "angra_1_e_angra_2": "a1_a2",
+        "hipotetico": "hipotetico",
+        "hipotético": "hipotetico",
+        "cenario_hipotetico": "hipotetico",
+        "cenário_hipotético": "hipotetico",
+    }
+    return aliases.get(key, key if key in SCENARIOS else "a1")
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _to_float(value: Any) -> float | None:
+    if _is_number(value):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if not text or text == "*":
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_scientific(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.2E}".replace("E+0", "E+").replace("E-0", "E-")
+
+
+def _format_p_value(value: float | None) -> str:
+    if value is None or not math.isfinite(value):
+        return "—"
+    if value < 0.0001:
+        return "p < 0,0001"
+    return f"p = {value:.4f}".replace(".", ",")
+
+
+def _format_decimal(value: float | None, *, digits: int = 4) -> str:
+    if value is None or not math.isfinite(value):
+        return "—"
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def _format_percent(value: float | None) -> str:
+    if value is None or not math.isfinite(value):
+        return "—"
+    return f"{value * 100:.2f}%".replace(".", ",")
+
+
+def _summary_stats(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "n": 0,
+            "mean": None,
+            "q1": None,
+            "median": None,
+            "q3": None,
+            "p95": None,
+            "min": None,
+            "max": None,
+        }
+    ordered = sorted(values)
+    quartiles = statistics.quantiles(ordered, n=4, method="inclusive") if len(ordered) > 1 else [ordered[0], ordered[0], ordered[0]]
+    return {
+        "n": len(values),
+        "mean": statistics.fmean(values),
+        "q1": quartiles[0],
+        "median": statistics.median(values),
+        "q3": quartiles[2],
+        "p95": statistics.quantiles(ordered, n=100, method="inclusive")[94] if len(ordered) > 1 else ordered[0],
+        "min": ordered[0],
+        "max": ordered[-1],
+    }
+
+
+def _ratio_status(value: float | None, reference: float | None) -> dict[str, Any]:
+    if value is None or reference is None or reference <= 0:
+        return {"reference": reference, "ratio": None, "status": "sem referência"}
+    ratio = value / reference
+    return {"reference": reference, "ratio": ratio, "status": "abaixo" if ratio <= 1.0 else "acima"}
+
+
+def _read_radionuclide_rows(ws: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row_index in range(1, ws.max_row + 1):
+        radionuclide = ws.cell(row_index, 2).value
+        if not isinstance(radionuclide, str) or not re.match(r"^[A-Z][a-z]?-\d+", radionuclide.strip()):
+            continue
+        item: dict[str, Any] = {
+            "row": row_index,
+            "radionuclide": radionuclide.strip(),
+            "source_concentration_bq_m3": _to_float(ws.cell(row_index, 3).value),
+            "fraction": _to_float(ws.cell(row_index, 4).value),
+            "activity_bq": _to_float(ws.cell(row_index, 5).value),
+            "compartments": {},
+        }
+        for compartment in COMPARTMENTS:
+            value = _to_float(ws.cell(row_index, compartment["value_col"]).value)
+            report_level = _to_float(ws.cell(row_index, compartment["report_level_col"]).value)
+            lld = _to_float(ws.cell(row_index, compartment["lld_col"]).value)
+            report_result = _ratio_status(value, report_level)
+            lld_result = _ratio_status(value, lld)
+            item["compartments"][compartment["key"]] = {
+                "label": compartment["label"],
+                "unit": compartment["unit"],
+                "value": value,
+                "value_text": _format_scientific(value),
+                "report_level": report_result["reference"],
+                "report_level_text": _format_scientific(report_result["reference"]),
+                "report_level_ratio": report_result["ratio"],
+                "report_level_ratio_text": f"{report_result['ratio']:.4f}".replace(".", ",") if report_result["ratio"] is not None else "—",
+                "report_level_status": report_result["status"],
+                "lld": lld_result["reference"],
+                "lld_text": _format_scientific(lld_result["reference"]),
+                "lld_ratio": lld_result["ratio"],
+                "lld_ratio_text": f"{lld_result['ratio']:.4f}".replace(".", ",") if lld_result["ratio"] is not None else "—",
+                "lld_status": lld_result["status"],
+            }
+        rows.append(item)
+    return rows
+
+
+def _scenario_totals(ws: Any) -> dict[str, Any]:
+    return {
+        "total_water_concentration_bq_m3": _to_float(ws.cell(13, 7).value),
+        "circulation_flow_m3_year": _to_float(ws.cell(17, 5).value),
+        "tar_capacity_m3": _to_float(ws.cell(17, 3).value),
+        "activity_bq_year": _to_float(ws.cell(18, 3).value),
+    }
+
+
+def _build_reference_counts(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for compartment in COMPARTMENTS:
+        key = compartment["key"]
+        report_refs = [
+            row["radionuclide"]
+            for row in rows
+            if row["compartments"][key]["report_level"] is not None
+        ]
+        lld_refs = [
+            row["radionuclide"]
+            for row in rows
+            if row["compartments"][key]["lld"] is not None
+        ]
+        counts[key] = {
+            "label": compartment["label"],
+            "report_level": len(report_refs),
+            "lld": len(lld_refs),
+            "report_level_radionuclides": report_refs,
+            "lld_radionuclides": lld_refs,
+        }
+    return counts
+
+
+def _build_exceedances(rows: list[dict[str, Any]], *, reference: str) -> list[dict[str, Any]]:
+    exceedances: list[dict[str, Any]] = []
+    status_key = "report_level_status" if reference == "Report Level" else "lld_status"
+    ratio_key = "report_level_ratio" if reference == "Report Level" else "lld_ratio"
+    for row in rows:
+        for compartment in COMPARTMENTS:
+            result = row["compartments"][compartment["key"]]
+            if result[status_key] != "acima":
+                continue
+            exceedances.append(
+                {
+                    "radionuclide": row["radionuclide"],
+                    "compartment": compartment["label"],
+                    "reference": reference,
+                    "value": result["value"],
+                    "ratio": result[ratio_key],
+                }
+            )
+    return exceedances
+
+
+def _scenario_summary(scenario_key: str, ws: Any) -> dict[str, Any]:
+    rows = _read_radionuclide_rows(ws)
+    if not rows:
+        raise TarWorkbookError(f"Nenhum radionuclídeo foi encontrado na aba {ws.title!r}.")
+    reference_counts = _build_reference_counts(rows)
+    report_level_exceedances = _build_exceedances(rows, reference="Report Level")
+    lld_exceedances = _build_exceedances(rows, reference="LLD")
+    return {
+        "key": scenario_key,
+        "sheet": ws.title,
+        "label": SCENARIOS[scenario_key]["label"],
+        "radionuclide_count": len(rows),
+        "radionuclides": [row["radionuclide"] for row in rows],
+        "expected_radionuclides": EXPECTED_RADIONUCLIDES,
+        "rows": rows,
+        "totals": _scenario_totals(ws),
+        "reference_counts": reference_counts,
+        "exceedances": report_level_exceedances,
+        "report_level_exceedances": report_level_exceedances,
+        "lld_exceedances": lld_exceedances,
+        "has_reference_exceedance": bool(report_level_exceedances),
+        "has_lld_exceedance": bool(lld_exceedances),
+    }
+
+
+def _safe_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _generate_positive_measurements(base_value: float, count: int, rng: random.Random) -> list[float]:
+    sigma = 0.18
+    measurements: list[float] = []
+    for _ in range(count):
+        measurement = rng.lognormvariate(math.log(max(base_value, 1e-12)), sigma)
+        measurements.append(measurement)
+    return measurements
+
+
+def _sensitivity_variable_specs(base_activity: float, base_flow: float) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "activity_factor",
+            "label": "Atividade total do TAR",
+            "distribution": "Triangular",
+            "parameters": "0,50x / 0,75x / 1,00x",
+            "base_value": base_activity,
+            "base_value_text": _format_scientific(base_activity),
+            "unit": "Bq/ano",
+            "description": "Multiplicador sintético aplicado à atividade total descarregada pelo TAR.",
+        },
+        {
+            "key": "flow_factor",
+            "label": "Vazão de diluição",
+            "distribution": "Triangular",
+            "parameters": "0,75x / 1,00x / 1,25x",
+            "base_value": base_flow,
+            "base_value_text": _format_scientific(base_flow),
+            "unit": "m³/ano",
+            "description": "Multiplicador sintético da vazão; valores maiores reduzem a concentração por diluição.",
+        },
+        {
+            "key": "fish_bio_factor",
+            "label": "Fator de bioacumulação - peixe",
+            "distribution": "Lognormal",
+            "parameters": "mediana 1,00x; sigma 0,35",
+            "base_value": 1.0,
+            "base_value_text": "1,00x",
+            "unit": "multiplicador",
+            "description": "Variação sintética do fator de bioacumulação para peixes.",
+        },
+        {
+            "key": "invertebrate_bio_factor",
+            "label": "Fator de bioacumulação - invertebrado",
+            "distribution": "Lognormal",
+            "parameters": "mediana 1,00x; sigma 0,50",
+            "base_value": 1.0,
+            "base_value_text": "1,00x",
+            "unit": "multiplicador",
+            "description": "Variação sintética do fator de bioacumulação para invertebrados.",
+        },
+        {
+            "key": "sediment_transfer_factor",
+            "label": "Transferência para sedimento",
+            "distribution": "Lognormal",
+            "parameters": "mediana 1,00x; sigma 0,65",
+            "base_value": 1.0,
+            "base_value_text": "1,00x",
+            "unit": "multiplicador",
+            "description": "Variação sintética agregando Kd/Kc e transferência sedimentar.",
+        },
+        {
+            "key": "exposure_factor",
+            "label": "Tempo de exposição",
+            "distribution": "Uniforme",
+            "parameters": "0,50x a 1,50x",
+            "base_value": 1.0,
+            "base_value_text": "1,00x",
+            "unit": "multiplicador",
+            "description": "Multiplicador sintético do tempo de exposição nos compartimentos biota e sedimento.",
+        },
+    ]
+
+
+def _sample_sensitivity_variables(rng: random.Random) -> dict[str, float]:
+    return {
+        "activity_factor": rng.triangular(0.50, 1.00, 0.75),
+        "flow_factor": rng.triangular(0.75, 1.25, 1.00),
+        "fish_bio_factor": rng.lognormvariate(0.0, 0.35),
+        "invertebrate_bio_factor": rng.lognormvariate(0.0, 0.50),
+        "sediment_transfer_factor": rng.lognormvariate(0.0, 0.65),
+        "exposure_factor": rng.uniform(0.50, 1.50),
+    }
+
+
+def _sensitivity_multiplier(compartment_key: str, variables: dict[str, float]) -> float:
+    water_multiplier = variables["activity_factor"] / variables["flow_factor"]
+    if compartment_key == "fish":
+        return water_multiplier * variables["fish_bio_factor"] * variables["exposure_factor"]
+    if compartment_key == "invertebrate":
+        return water_multiplier * variables["invertebrate_bio_factor"] * variables["exposure_factor"]
+    if compartment_key == "sediment":
+        return water_multiplier * variables["sediment_transfer_factor"] * variables["exposure_factor"]
+    return water_multiplier
+
+
+def _build_histogram(values: list[float], *, bin_count: int = 12) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    lower = min(values)
+    upper = max(values)
+    if not math.isfinite(lower) or not math.isfinite(upper):
+        return []
+    if upper <= lower:
+        upper = lower + 1.0
+    step = (upper - lower) / bin_count
+    counts = [0 for _ in range(bin_count)]
+    for value in values:
+        index = min(bin_count - 1, max(0, int((value - lower) / step)))
+        counts[index] += 1
+    return [
+        {
+            "start": lower + index * step,
+            "end": lower + (index + 1) * step,
+            "count": count,
+            "label": f"{_format_decimal(lower + index * step, digits=2)}-{_format_decimal(lower + (index + 1) * step, digits=2)}",
+        }
+        for index, count in enumerate(counts)
+    ]
+
+
+def _build_sensitivity_analysis(scenario: dict[str, Any], *, sample_count: int, seed: int) -> dict[str, Any]:
+    rng = random.Random(seed)
+    totals = scenario.get("totals") or {}
+    base_activity = totals.get("activity_bq_year") or DEFAULT_TAR_ACTIVITY_BQ_YEAR
+    base_flow = totals.get("circulation_flow_m3_year") or DEFAULT_DILUTION_FLOW_M3_YEAR
+    variable_specs = _sensitivity_variable_specs(float(base_activity), float(base_flow))
+    variable_samples: dict[str, list[float]] = {spec["key"]: [] for spec in variable_specs}
+    value_samples: dict[tuple[str, str], list[float]] = {}
+    exceedance_counts: dict[tuple[str, str], int] = {}
+    max_report_level_ratios: list[float] = []
+
+    rows = scenario.get("rows") or []
+    for row in rows:
+        for compartment in COMPARTMENTS:
+            value_samples[(row["radionuclide"], compartment["key"])] = []
+            exceedance_counts[(row["radionuclide"], compartment["key"])] = 0
+
+    for _ in range(sample_count):
+        variables = _sample_sensitivity_variables(rng)
+        for key, value in variables.items():
+            variable_samples[key].append(value)
+        sample_ratios: list[float] = []
+        for row in rows:
+            for compartment in COMPARTMENTS:
+                compartment_key = compartment["key"]
+                data = row["compartments"][compartment_key]
+                base_value = data.get("value")
+                if base_value is None:
+                    continue
+                value = float(base_value) * _sensitivity_multiplier(compartment_key, variables)
+                sample_key = (row["radionuclide"], compartment_key)
+                value_samples[sample_key].append(value)
+                report_level = data.get("report_level")
+                if report_level is not None and report_level > 0:
+                    ratio = value / float(report_level)
+                    sample_ratios.append(ratio)
+                    if ratio > 1.0:
+                        exceedance_counts[sample_key] += 1
+        max_report_level_ratios.append(max(sample_ratios) if sample_ratios else 0.0)
+
+    summary_rows: list[dict[str, Any]] = []
+    for row in rows:
+        for compartment in COMPARTMENTS:
+            compartment_key = compartment["key"]
+            data = row["compartments"][compartment_key]
+            sample_key = (row["radionuclide"], compartment_key)
+            stats_summary = _summary_stats(value_samples.get(sample_key, []))
+            report_level = data.get("report_level")
+            p95 = stats_summary["p95"]
+            p95_ratio = (p95 / report_level) if p95 is not None and report_level is not None and report_level > 0 else None
+            exceedance_probability = (
+                exceedance_counts.get(sample_key, 0) / sample_count
+                if report_level is not None and report_level > 0
+                else None
+            )
+            summary_rows.append(
+                {
+                    "radionuclide": row["radionuclide"],
+                    "compartment": compartment["label"],
+                    "compartment_key": compartment_key,
+                    "unit": compartment["unit"],
+                    "mean": stats_summary["mean"],
+                    "mean_text": _format_scientific(stats_summary["mean"]),
+                    "min": stats_summary["min"],
+                    "min_text": _format_scientific(stats_summary["min"]),
+                    "max": stats_summary["max"],
+                    "max_text": _format_scientific(stats_summary["max"]),
+                    "p95": p95,
+                    "p95_text": _format_scientific(p95),
+                    "report_level": report_level,
+                    "report_level_text": _format_scientific(report_level),
+                    "p95_report_level_ratio": p95_ratio,
+                    "p95_report_level_ratio_text": _format_decimal(p95_ratio),
+                    "exceedance_probability": exceedance_probability,
+                    "exceedance_probability_text": _format_percent(exceedance_probability),
+                }
+            )
+
+    influence_rows: list[dict[str, Any]] = []
+    for spec in variable_specs:
+        correlation = 0.0
+        try:
+            result = stats.spearmanr(variable_samples[spec["key"]], max_report_level_ratios)
+            raw_correlation = float(result.correlation)
+            correlation = raw_correlation if math.isfinite(raw_correlation) else 0.0
+        except Exception:
+            correlation = 0.0
+        influence_rows.append(
+            {
+                "key": spec["key"],
+                "label": spec["label"],
+                "correlation": correlation,
+                "correlation_text": _format_decimal(correlation, digits=3),
+                "absolute_correlation": abs(correlation),
+                "absolute_correlation_text": _format_decimal(abs(correlation), digits=3),
+                "direction": "aumenta" if correlation > 0 else "reduz" if correlation < 0 else "neutra",
+            }
+        )
+    influence_rows.sort(key=lambda item: item["absolute_correlation"], reverse=True)
+
+    referenced_rows = [row for row in summary_rows if row["exceedance_probability"] is not None]
+    max_exceedance_row = max(referenced_rows, key=lambda item: item["exceedance_probability"], default=None)
+    max_ratio_row = max(referenced_rows, key=lambda item: item["p95_report_level_ratio"] or -1.0, default=None)
+    dominant = influence_rows[0] if influence_rows else None
+    max_ratio_stats = _summary_stats(max_report_level_ratios)
+    narrative_text = (
+        f"A análise de sensibilidade Monte Carlo executou {sample_count} cenários sintéticos com seed {seed}. "
+        "O seed é o número que inicializa o sorteio pseudoaleatório; mantendo o mesmo seed, o sistema reproduz exatamente os mesmos cenários. "
+        "Os intervalos são demonstrativos e aplicam multiplicadores simples sobre os resultados atuais do TAR, "
+        "servindo para triagem exploratória das variáveis que mais aproximam os resultados do Report Level."
+    )
+
+    return {
+        "sample_count": sample_count,
+        "seed": seed,
+        "synthetic": True,
+        "source_note": "Intervalos sintéticos demonstrativos; não substituem constantes de literatura nem conclusão regulatória.",
+        "base_activity_bq_year": float(base_activity),
+        "base_activity_bq_year_text": _format_scientific(float(base_activity)),
+        "base_flow_m3_year": float(base_flow),
+        "base_flow_m3_year_text": _format_scientific(float(base_flow)),
+        "variables": variable_specs,
+        "summary_rows": summary_rows,
+        "influence_rows": influence_rows,
+        "narrative_text": narrative_text,
+        "cards": [
+            {"label": "Simulações", "value": f"{sample_count:,}".replace(",", ".")},
+            {"label": "Seed reprodutível", "value": str(seed)},
+            {
+                "label": "Maior prob. > Report Level",
+                "value": max_exceedance_row["exceedance_probability_text"] if max_exceedance_row else "—",
+            },
+            {"label": "Variável dominante", "value": dominant["label"] if dominant else "—"},
+        ],
+        "max_exceedance_row": max_exceedance_row,
+        "max_ratio_row": max_ratio_row,
+        "max_report_level_ratio_stats": {
+            **max_ratio_stats,
+            "min_text": _format_decimal(max_ratio_stats["min"], digits=3),
+            "q1_text": _format_decimal(max_ratio_stats["q1"], digits=3),
+            "median_text": _format_decimal(max_ratio_stats["median"], digits=3),
+            "q3_text": _format_decimal(max_ratio_stats["q3"], digits=3),
+            "mean_text": _format_decimal(max_ratio_stats["mean"], digits=3),
+            "p95_text": _format_decimal(max_ratio_stats["p95"], digits=3),
+            "max_text": _format_decimal(max_ratio_stats["max"], digits=3),
+        },
+        "chart_payloads": {
+            "tornado": {"rows": influence_rows},
+            "heatmap": {
+                "compartments": [{"key": item["key"], "label": item["label"]} for item in COMPARTMENTS],
+                "radionuclides": [row["radionuclide"] for row in rows],
+                "cells": [
+                    {
+                        "radionuclide": row["radionuclide"],
+                        "compartment": row["compartment"],
+                        "compartment_key": row["compartment_key"],
+                        "probability": row["exceedance_probability"],
+                        "probability_text": row["exceedance_probability_text"],
+                    }
+                    for row in summary_rows
+                ],
+            },
+            "histogram": {
+                "bins": _build_histogram(max_report_level_ratios),
+                "reference": 1.0,
+                "reference_label": "Report Level",
+            },
+            "boxplot": {
+                "stats": {
+                    "min": max_ratio_stats["min"],
+                    "q1": max_ratio_stats["q1"],
+                    "median": max_ratio_stats["median"],
+                    "q3": max_ratio_stats["q3"],
+                    "max": max_ratio_stats["max"],
+                    "p95": max_ratio_stats["p95"],
+                    "min_text": _format_decimal(max_ratio_stats["min"], digits=3),
+                    "q1_text": _format_decimal(max_ratio_stats["q1"], digits=3),
+                    "median_text": _format_decimal(max_ratio_stats["median"], digits=3),
+                    "q3_text": _format_decimal(max_ratio_stats["q3"], digits=3),
+                    "max_text": _format_decimal(max_ratio_stats["max"], digits=3),
+                    "p95_text": _format_decimal(max_ratio_stats["p95"], digits=3),
+                },
+                "reference": 1.0,
+                "reference_label": "Report Level",
+            },
+        },
+    }
+
+
+def _run_one_sample_limit_test(values: list[float], report_level: float | None) -> dict[str, Any]:
+    if not values or report_level is None or report_level <= 0:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": "Sem Report Level numérico para comparação inferencial.",
+        }
+    ratios = [value / report_level for value in values if value is not None and value > 0]
+    if len(ratios) < 3:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": "Menos de 3 simulações válidas para triagem de normalidade.",
+            "n": len(ratios),
+        }
+
+    log_ratios = [math.log(ratio) for ratio in ratios]
+    shapiro_w = None
+    shapiro_p = None
+    try:
+        shapiro_w, shapiro_p = stats.shapiro(log_ratios)
+        shapiro_w = float(shapiro_w)
+        shapiro_p = float(shapiro_p)
+    except Exception:
+        shapiro_w = None
+        shapiro_p = None
+
+    normality_met = shapiro_p is not None and shapiro_p >= 0.05
+    if normality_met:
+        test_label = "Teste t unilateral de uma amostra"
+        try:
+            result = stats.ttest_1samp(log_ratios, popmean=0.0, alternative="less")
+            statistic = float(result.statistic)
+            p_value = float(result.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+    else:
+        test_label = "Wilcoxon unilateral de uma amostra"
+        try:
+            result = stats.wilcoxon(log_ratios, alternative="less", zero_method="pratt")
+            statistic = float(result.statistic)
+            p_value = float(result.pvalue)
+        except Exception:
+            statistic = None
+            p_value = None
+
+    exceedance_count = sum(1 for ratio in ratios if ratio > 1.0)
+    stats_summary = _summary_stats(ratios)
+    p95_ratio = stats_summary["p95"]
+    significant_below = p_value is not None and p_value < 0.05 and p95_ratio is not None and p95_ratio < 1.0
+    if significant_below and exceedance_count == 0:
+        conclusion = "as simulações permaneceram estatisticamente abaixo do Report Level"
+    elif significant_below:
+        conclusion = "a tendência central ficou abaixo do Report Level, mas houve simulações acima da referência"
+    elif p_value is None:
+        conclusion = "o teste selecionado não produziu p-value válido"
+    else:
+        conclusion = "não houve evidência estatística suficiente para afirmar margem abaixo do Report Level"
+
+    return {
+        "applicable": p_value is not None,
+        "n": len(ratios),
+        "test_label": test_label,
+        "statistic": statistic,
+        "p_value": p_value,
+        "p_value_text": _format_p_value(p_value),
+        "shapiro_w": shapiro_w,
+        "shapiro_p": shapiro_p,
+        "shapiro_p_text": _format_p_value(shapiro_p),
+        "normality_met": normality_met,
+        "p95_ratio": p95_ratio,
+        "p95_ratio_text": f"{p95_ratio:.4f}".replace(".", ",") if p95_ratio is not None else "—",
+        "exceedance_count": exceedance_count,
+        "exceedance_rate": exceedance_count / len(ratios) if ratios else None,
+        "conclusion": conclusion,
+    }
+
+
+def _build_hypothetical_test_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        for compartment in COMPARTMENTS:
+            data = row["compartments"][compartment["key"]]
+            report_level = data.get("report_level")
+            simulated_values = data.get("simulated_values") or []
+            if report_level is None:
+                continue
+            result = _run_one_sample_limit_test(simulated_values, report_level)
+            result.update(
+                {
+                    "radionuclide": row["radionuclide"],
+                    "compartment": compartment["label"],
+                    "unit": compartment["unit"],
+                    "report_level": report_level,
+                    "report_level_text": data.get("report_level_text"),
+                    "p95_value": data.get("value"),
+                    "p95_value_text": data.get("value_text"),
+                }
+            )
+            results.append(result)
+    return results
+
+
+def _build_hypothetical_statistical_text(test_results: list[dict[str, Any]], measurement_count: int) -> str:
+    applicable = [result for result in test_results if result.get("applicable")]
+    if not applicable:
+        return (
+            "O cenário hipotético gerou medições sintéticas, mas não encontrou pares suficientes de simulação e "
+            "Report Level para aplicar teste inferencial."
+        )
+    test_labels = sorted({str(result.get("test_label")) for result in applicable})
+    significant = [result for result in applicable if result.get("p_value") is not None and result.get("p_value") < 0.05]
+    exceeded = [result for result in applicable if int(result.get("exceedance_count") or 0) > 0]
+    if len(significant) == len(applicable) and not exceeded:
+        closing = "Todos os contrastes com Report Level ficaram estatisticamente abaixo da referência, sem simulações acima do limite."
+    elif significant:
+        closing = "Parte dos contrastes ficou estatisticamente abaixo da referência; os casos com simulações acima do limite devem ser avaliados individualmente."
+    else:
+        closing = "Os testes não sustentaram evidência estatística suficiente de margem abaixo do Report Level."
+    return (
+        f"O cenário hipotético gerou {measurement_count} medições sintéticas de espectrometria gama para cada radionuclídeo da água do TAR. "
+        "Cada medição alimentou a simulação dos compartimentos ambientais, preservando a relação entre valor medido e resultado simulado. "
+        "A comparação inferencial foi feita sobre o logaritmo da razão simulado/Report Level. "
+        "O Shapiro-Wilk avaliou a normalidade dessas razões; quando a normalidade foi atendida, aplicou-se teste t unilateral de uma amostra, "
+        "e, quando não foi atendida, aplicou-se Wilcoxon unilateral de uma amostra. "
+        f"Os testes utilizados foram: {', '.join(test_labels)}. {closing}"
+    )
+
+
+def _hypothetical_scenario_summary(
+    base_scenario: dict[str, Any],
+    *,
+    measurement_count: int,
+    seed: int,
+) -> dict[str, Any]:
+    rng = random.Random(seed)
+    rows: list[dict[str, Any]] = []
+    for base_row in base_scenario["rows"]:
+        source_base = base_row.get("source_concentration_bq_m3")
+        if source_base is None or source_base <= 0:
+            continue
+        measurements = _generate_positive_measurements(source_base, measurement_count, rng)
+        measurement_summary = _summary_stats(measurements)
+        generated_row: dict[str, Any] = {
+            "row": base_row.get("row"),
+            "radionuclide": base_row["radionuclide"],
+            "source_concentration_bq_m3": source_base,
+            "source_concentration_bq_m3_text": _format_scientific(source_base),
+            "measurement_count": measurement_count,
+            "measurements_bq_m3": measurements,
+            "measurement_summary": {
+                **measurement_summary,
+                "mean_text": _format_scientific(measurement_summary["mean"]),
+                "median_text": _format_scientific(measurement_summary["median"]),
+                "p95_text": _format_scientific(measurement_summary["p95"]),
+                "min_text": _format_scientific(measurement_summary["min"]),
+                "max_text": _format_scientific(measurement_summary["max"]),
+            },
+            "compartments": {},
+        }
+        for compartment in COMPARTMENTS:
+            base_data = base_row["compartments"][compartment["key"]]
+            base_value = base_data.get("value")
+            simulated_values = [
+                base_value * (measurement / source_base)
+                for measurement in measurements
+                if base_value is not None
+            ]
+            simulated_summary = _summary_stats(simulated_values)
+            p95_value = simulated_summary["p95"]
+            report_result = _ratio_status(p95_value, base_data.get("report_level"))
+            lld_result = _ratio_status(p95_value, base_data.get("lld"))
+            generated_row["compartments"][compartment["key"]] = {
+                "label": compartment["label"],
+                "unit": compartment["unit"],
+                "value": p95_value,
+                "value_text": _format_scientific(p95_value),
+                "display_statistic": "P95",
+                "simulated_values": simulated_values,
+                "simulated_summary": {
+                    **simulated_summary,
+                    "mean_text": _format_scientific(simulated_summary["mean"]),
+                    "median_text": _format_scientific(simulated_summary["median"]),
+                    "p95_text": _format_scientific(simulated_summary["p95"]),
+                    "min_text": _format_scientific(simulated_summary["min"]),
+                    "max_text": _format_scientific(simulated_summary["max"]),
+                },
+                "report_level": report_result["reference"],
+                "report_level_text": _format_scientific(report_result["reference"]),
+                "report_level_ratio": report_result["ratio"],
+                "report_level_ratio_text": f"{report_result['ratio']:.4f}".replace(".", ",") if report_result["ratio"] is not None else "—",
+                "report_level_status": report_result["status"],
+                "lld": lld_result["reference"],
+                "lld_text": _format_scientific(lld_result["reference"]),
+                "lld_ratio": lld_result["ratio"],
+                "lld_ratio_text": f"{lld_result['ratio']:.4f}".replace(".", ",") if lld_result["ratio"] is not None else "—",
+                "lld_status": lld_result["status"],
+            }
+        rows.append(generated_row)
+
+    reference_counts = _build_reference_counts(rows)
+    report_level_exceedances = _build_exceedances(rows, reference="Report Level")
+    lld_exceedances = _build_exceedances(rows, reference="LLD")
+    test_results = _build_hypothetical_test_results(rows)
+    totals = dict(base_scenario.get("totals") or {})
+    totals["total_water_concentration_bq_m3"] = sum(
+        row["compartments"]["water"]["value"] or 0.0
+        for row in rows
+    )
+    return {
+        "key": "hipotetico",
+        "sheet": "gerado",
+        "label": "Cenário hipotético",
+        "source_scenario": base_scenario.get("label"),
+        "source_sheet": base_scenario.get("sheet"),
+        "is_hypothetical": True,
+        "seed": seed,
+        "measurement_count": measurement_count,
+        "radionuclide_count": len(rows),
+        "radionuclides": [row["radionuclide"] for row in rows],
+        "expected_radionuclides": EXPECTED_RADIONUCLIDES,
+        "rows": rows,
+        "totals": totals,
+        "reference_counts": reference_counts,
+        "exceedances": report_level_exceedances,
+        "report_level_exceedances": report_level_exceedances,
+        "lld_exceedances": lld_exceedances,
+        "has_reference_exceedance": bool(report_level_exceedances),
+        "has_lld_exceedance": bool(lld_exceedances),
+        "statistical_tests": test_results,
+        "statistical_text": _build_hypothetical_statistical_text(test_results, measurement_count),
+    }
+
+
+def _inferential_assessment() -> dict[str, Any]:
+    return {
+        "applicable": False,
+        "status": "teste inferencial não aplicável",
+        "reason": (
+            "A planilha TAR contém resultados calculados por modelo determinístico. O n = 8 representa radionuclídeos, "
+            "não amostras ambientais independentes nem réplicas por matriz."
+        ),
+        "current_n": 8,
+        "sample_unit": "radionuclídeo calculado",
+        "recommended_action": (
+            "Para inferência estatística, registrar medições ambientais reais com réplicas por compartimento, "
+            "radionuclídeo, cenário e período de coleta."
+        ),
+        "minimums": INFERENTIAL_TEST_MINIMUMS,
+    }
+
+
+def load_tar_workbook_model(
+    workbook_path: str | Path,
+    *,
+    hypothetical_n: int = 60,
+    hypothetical_seed: int = 20260504,
+) -> dict[str, Any]:
+    path = Path(workbook_path)
+    if not path.exists():
+        raise TarWorkbookError(f"Planilha TAR não encontrada: {path}")
+    try:
+        workbook = openpyxl.load_workbook(path, data_only=True, read_only=False)
+    except Exception as exc:
+        raise TarWorkbookError(f"Não foi possível abrir a planilha TAR: {exc}") from exc
+    try:
+        scenarios: dict[str, Any] = {}
+        for scenario_key, spec in SCENARIOS.items():
+            sheet_name = spec["sheet"]
+            if not sheet_name:
+                continue
+            if sheet_name not in workbook.sheetnames:
+                raise TarWorkbookError(f"A aba obrigatória {sheet_name!r} não foi encontrada na planilha TAR.")
+            scenarios[scenario_key] = _scenario_summary(scenario_key, workbook[sheet_name])
+        scenarios["hipotetico"] = _hypothetical_scenario_summary(
+            scenarios["a1_a2"],
+            measurement_count=hypothetical_n,
+            seed=hypothetical_seed,
+        )
+        return {
+            "workbook_path": str(path),
+            "scenarios": scenarios,
+            "inferential_assessment": _inferential_assessment(),
+        }
+    finally:
+        workbook.close()
+
+
+def build_tar_summary(
+    workbook_path: str | Path,
+    scenario: Any = "a1",
+    *,
+    hypothetical_n: Any = 60,
+    hypothetical_seed: Any = 20260504,
+    sensitivity_n: Any = DEFAULT_SENSITIVITY_N,
+    sensitivity_seed: Any = DEFAULT_SENSITIVITY_SEED,
+) -> dict[str, Any]:
+    resolved_n = _safe_int(hypothetical_n, 60, minimum=10, maximum=500)
+    resolved_seed = _safe_int(hypothetical_seed, 20260504, minimum=1, maximum=999999999)
+    resolved_sensitivity_n = _safe_int(sensitivity_n, DEFAULT_SENSITIVITY_N, minimum=100, maximum=50000)
+    resolved_sensitivity_seed = _safe_int(sensitivity_seed, DEFAULT_SENSITIVITY_SEED, minimum=1, maximum=999999999)
+    model = load_tar_workbook_model(
+        workbook_path,
+        hypothetical_n=resolved_n,
+        hypothetical_seed=resolved_seed,
+    )
+    scenario_key = resolve_tar_scenario_key(scenario)
+    scenario_model = dict(model["scenarios"][scenario_key])
+    scenario_model["sensitivity"] = _build_sensitivity_analysis(
+        scenario_model,
+        sample_count=resolved_sensitivity_n,
+        seed=resolved_sensitivity_seed,
+    )
+    return {
+        "ok": True,
+        "workbook_path": model["workbook_path"],
+        "selected_scenario": scenario_key,
+        "available_scenarios": [
+            {"key": key, "label": value["label"], "sheet": value["sheet"]}
+            for key, value in SCENARIOS.items()
+        ],
+        "scenario": scenario_model,
+        "inferential_assessment": model["inferential_assessment"],
+    }

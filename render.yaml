@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tar-beta
+    env: python
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /healthz
+    buildCommand: pip install -r requirements.txt
+    startCommand: waitress-serve --host=0.0.0.0 --port=$PORT wsgi:application
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: TAR_WORKBOOK_PATH
+        value: ./Cópia de TAR.xlsx
+      - key: TAR_ARTICLE_PATH
+        value: ./Artigo TAR.docx
