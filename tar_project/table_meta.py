@@ -101,12 +101,12 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "number": 6,
         "caption": "Resumo por grupo de amostras",
         "lead_text": (
-            "A {table} separa as amostras reais em TAR - Afluente e TAR - Efluente. "
-            "Os dados indicam a cobertura de A-TAR numérico, valores censurados e registros ausentes em cada grupo. "
+            "A {table} reúne somente as amostras reais do TAR - Afluente usadas na análise. "
+            "Os dados indicam a cobertura de A-TAR numérico, valores censurados e registros ausentes nesse grupo. "
             "Assim, a tabela define a base empírica antes do cálculo por radionuclídeo."
         ),
         "column_notes": [
-            "Grupo: identificação da amostra como afluente ou efluente.",
+            "Grupo: identificação da amostra como TAR - Afluente.",
             "Amostras: total de registros do grupo.",
             "A-TAR detectado: registros com atividade total numérica.",
             "A-TAR < MDA: registros abaixo do mínimo detectável.",
@@ -126,7 +126,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
             "Assim, a tabela preserva a diferença entre valor medido e registro menor que MDA."
         ),
         "column_notes": [
-            "Grupo: afluente ou efluente.",
+            "Grupo: TAR - Afluente.",
             "Radionuclídeo: radionuclídeo medido na planilha empírica.",
             "Status no modelo: indica se o radionuclídeo é modelado pela planilha TAR atual.",
             "Amostras: total de registros do grupo.",
@@ -149,7 +149,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
             "Assim, a tabela conecta as medições reais à comparação ambiental usada no relatório."
         ),
         "column_notes": [
-            "Grupo: afluente ou efluente.",
+            "Grupo: TAR - Afluente.",
             "Radionuclídeo: radionuclídeo modelado pela planilha TAR.",
             "Compartimento: água, peixe, invertebrado ou sedimento.",
             "n: número de amostras válidas usadas no cálculo.",
@@ -163,12 +163,36 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         ],
         "unit_note": "Os resultados usam a unidade do compartimento ambiental.",
     },
-    "stat_calculated": {
+    "empirical_inferential": {
         "number": 9,
+        "caption": "Inferência com dados reais do TAR - Afluente contra Report Level fixo",
+        "lead_text": (
+            "A {table} aplica inferência aos resultados calculados por amostra real do TAR - Afluente. "
+            "O Report Level é tratado como referência fixa; a incerteza fica na distribuição das amostras calculadas. "
+            "Assim, a tabela mostra frequência real de ultrapassagem, IC95% binomial e p-value quando o n permite teste sobre log(valor/referência)."
+        ),
+        "column_notes": [
+            "Grupo: TAR - Afluente.",
+            "Radionuclídeo: radionuclídeo modelado pela planilha TAR.",
+            "Compartimento: matriz ambiental avaliada.",
+            "n: número de amostras reais válidas usadas no contraste.",
+            "Report Level: referência fixa de notificação.",
+            "P95 razão: percentil 95 da razão valor calculado/Report Level.",
+            "Ultrapassagens: número de amostras calculadas acima do Report Level.",
+            "Freq. > Report Level: proporção observada de ultrapassagem.",
+            "IC95% freq.: intervalo de confiança binomial da frequência de ultrapassagem.",
+            "Teste: teste unilateral sobre log(valor/Report Level).",
+            "p-value: evidência estatística de valores abaixo do Report Level.",
+            "Conclusão: leitura técnica do contraste.",
+        ],
+        "unit_note": "Razões, frequências, IC95% e p-values são adimensionais.",
+    },
+    "stat_calculated": {
+        "number": 10,
         "caption": "Dados calculados por fórmulas de transporte/incorporação",
         "lead_text": (
             "A {table} reúne os valores determinísticos calculados pela planilha TAR para cada radionuclídeo e compartimento. "
-            "Esses valores são a base usada nas replicações sintéticas exploratórias. "
+            "Esses valores são mantidos como resultados de fórmula, sem replicações aleatórias. "
             "Assim, a tabela separa o resultado de fórmula dos valores simulados pelo ERICA Tool."
         ),
         "column_notes": [
@@ -181,10 +205,10 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "A unidade varia conforme o compartimento ambiental.",
     },
     "stat_erica": {
-        "number": 10,
+        "number": 11,
         "caption": "Dados simulados pelo ERICA Tool",
         "lead_text": (
-            "A {table} apresenta os valores extraídos do ERICA Tool para comparação exploratória com a planilha TAR. "
+            "A {table} apresenta os valores estimados do ERICA Tool para comparação exploratória com a planilha TAR. "
             "A água foi convertida para a mesma unidade usada no modelo TAR quando necessário. "
             "Assim, a tabela mantém separados os resultados de simulação externa e os resultados calculados por fórmula."
         ),
@@ -198,7 +222,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "A unidade varia conforme o compartimento ambiental.",
     },
     "stat_norms": {
-        "number": 11,
+        "number": 12,
         "caption": "Normas: Report Level e LLD",
         "lead_text": (
             "A {table} reúne os valores normativos fixos usados nas comparações. "
@@ -215,21 +239,21 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "Report Level é critério de notificação; LLD é referência de detecção.",
     },
     "stat_descriptive": {
-        "number": 12,
-        "caption": "Estatística descritiva das replicações sintéticas exploratórias",
+        "number": 13,
+        "caption": "Estatística descritiva dos valores calculados e estimados",
         "lead_text": (
-            "A {table} resume a distribuição das replicações sintéticas por conjunto, radionuclídeo e compartimento. "
-            "Média, mediana, quartis, P95 e CV mostram a dispersão produzida em torno do valor base. "
-            "Assim, a tabela documenta a variabilidade exploratória antes da comparação inferencial."
+            "A {table} resume, por compartimento, a dispersão dos valores determinísticos calculados e dos valores estimados pelo ERICA Tool. "
+            "Média, mediana, quartis, P95 e CV mostram como os radionuclídeos se distribuem em cada conjunto. "
+            "Assim, a tabela mantém estatística descritiva sem criar replicações aleatórias."
         ),
         "column_notes": [
-            "Conjunto: origem do valor base, calculado por fórmulas ou ERICA Tool.",
-            "Radionuclídeo: radionuclídeo avaliado.",
+            "Conjunto: origem do valor, calculado por fórmulas ou ERICA Tool.",
+            "Radionuclídeo: indica Todos quando a estatística resume os radionuclídeos do compartimento.",
             "Compartimento: matriz ambiental.",
-            "n: número de replicações sintéticas.",
-            "Média: média das replicações.",
-            "Mediana: valor central das replicações.",
-            "Desvio-padrão: dispersão absoluta das replicações.",
+            "n: número de valores por conjunto e compartimento.",
+            "Média: média dos valores.",
+            "Mediana: valor central dos valores.",
+            "Desvio-padrão: dispersão absoluta dos valores.",
             "Q1: primeiro quartil.",
             "Q3: terceiro quartil.",
             "P95: percentil 95.",
@@ -238,10 +262,10 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "CV é adimensional; as demais estatísticas usam a unidade do compartimento.",
     },
     "stat_inferential": {
-        "number": 13,
+        "number": 14,
         "caption": "Estatística inferencial contra Report Level e LLD",
         "lead_text": (
-            "A {table} apresenta os testes das replicações sintéticas contra as referências fixas. "
+            "A {table} apresenta testes contra referências fixas quando houver amostras válidas para esse contraste. "
             "O p-value indica a evidência estatística exploratória de margem abaixo da referência, enquanto P95 razão mostra a posição conservadora da distribuição. "
             "Assim, a tabela evita confundir significância estatística com conclusão regulatória final."
         ),
@@ -261,28 +285,27 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "Razões, p-values e taxas são adimensionais.",
     },
     "stat_paired": {
-        "number": 14,
+        "number": 15,
         "caption": "Comparação pareada: calculado por fórmulas vs ERICA Tool",
         "lead_text": (
-            "A {table} compara, por par, os resultados calculados pela planilha e os valores do ERICA Tool. "
+            "A {table} compara, por par, os resultados calculados pela planilha e os valores estimados do ERICA Tool. "
             "A razão calculado/ERICA mostra se uma fonte tende a ficar acima da outra no mesmo radionuclídeo e compartimento. "
-            "Assim, a tabela avalia compatibilidade exploratória sem tratar a comparação como validação regulatória final."
+            "Assim, a tabela oferece visualização estatística exploratória sem tratar a comparação como validação regulatória final."
         ),
         "column_notes": [
-            "Radionuclídeo: radionuclídeo comparado.",
+            "Escopo: todos os compartimentos ou um compartimento específico.",
             "Compartimento: matriz ambiental comparada.",
-            "n: número de pares sintéticos válidos.",
-            "Calculado: valor base da planilha TAR.",
-            "ERICA: valor base do ERICA Tool.",
+            "n: número de pares radionuclídeo-compartimento válidos.",
             "Mediana calculado/ERICA: mediana da razão entre as fontes.",
             "IC95% da razão média: intervalo de confiança da razão média em escala original.",
             "Teste: teste aplicado aos logaritmos das razões.",
             "p-value: resultado do teste pareado.",
+            "Conclusão: leitura exploratória da comparação.",
         ],
         "unit_note": "Razões e p-values são adimensionais; Calculado e ERICA usam a unidade do compartimento.",
     },
     "sensitivity_variables": {
-        "number": 15,
+        "number": 16,
         "caption": "Distribuições sintéticas usadas no Monte Carlo",
         "lead_text": (
             "A {table} define as variáveis sorteadas na análise de sensibilidade. "
@@ -300,7 +323,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "Multiplicadores são adimensionais.",
     },
     "sensitivity_influence": {
-        "number": 16,
+        "number": 17,
         "caption": "Ranking de influência sobre a maior razão valor simulado / Report Level",
         "lead_text": (
             "A {table} ordena as variáveis pela associação com a maior razão simulada em relação ao Report Level. "
@@ -316,7 +339,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "Correlação é adimensional e varia de -1 a +1.",
     },
     "sensitivity_results": {
-        "number": 17,
+        "number": 18,
         "caption": "Resumo dos resultados simulados por radionuclídeo e compartimento",
         "lead_text": (
             "A {table} consolida as faixas simuladas para cada radionuclídeo e compartimento. "
@@ -337,7 +360,7 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         "unit_note": "Probabilidade e razão são adimensionais; os demais valores usam a unidade do compartimento.",
     },
     "minimums": {
-        "number": 18,
+        "number": 19,
         "caption": "Critérios mínimos para suficiência estatística",
         "lead_text": (
             "A {table} reúne os mínimos técnicos e os mínimos recomendados para testes estatísticos usuais. "
@@ -363,4 +386,3 @@ def tar_table_meta(key: str) -> dict[str, Any]:
     meta["lead_text"] = str(meta.get("lead_text") or "").format(table=table_label)
     meta["column_notes"] = list(meta.get("column_notes") or [])
     return meta
-

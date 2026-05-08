@@ -24,6 +24,7 @@ SCENARIOS: dict[str, dict[str, str]] = {
 EXPECTED_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54", "Sb-124", "Sb-125", "Zr-95"]
 EMPIRICAL_ACTIVITY_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54", "Nb-95", "Sb-124", "Sb-125", "Zr-95"]
 EMPIRICAL_ACTIVITY_GROUPS = ["TAR - Afluente", "TAR - Efluente"]
+EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS = ["TAR - Afluente"]
 EMPIRICAL_ACTIVITY_DEFAULT_FILENAME = "Atividade Total TAR c radionuclideos.xls"
 
 COMPARTMENTS: list[dict[str, Any]] = [
@@ -782,10 +783,11 @@ def _scenario_compartment_multipliers(scenario_row: dict[str, Any]) -> dict[str,
     return multipliers
 
 
-def _group_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _group_records(records: list[dict[str, Any]], groups: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    selected_groups = groups or EMPIRICAL_ACTIVITY_GROUPS
     return {
         group: [record for record in records if record.get("group") == group]
-        for group in EMPIRICAL_ACTIVITY_GROUPS
+        for group in selected_groups
     }
 
 
@@ -804,6 +806,107 @@ def _reference_summary(values: list[float], reference: float | None) -> dict[str
         "exceedance_count": exceedance_count if exceedance_rate is not None else None,
         "exceedance_rate": exceedance_rate,
         "exceedance_rate_text": _format_percent(exceedance_rate),
+    }
+
+
+def _binomial_confidence_interval(success_count: int, sample_count: int, *, alpha: float = 0.05) -> tuple[float | None, float | None]:
+    if sample_count <= 0:
+        return None, None
+    low = 0.0 if success_count == 0 else float(stats.beta.ppf(alpha / 2.0, success_count, sample_count - success_count + 1))
+    high = 1.0 if success_count == sample_count else float(stats.beta.ppf(1.0 - alpha / 2.0, success_count + 1, sample_count - success_count))
+    return low, high
+
+
+def _real_reference_inference(values: list[float], reference: float | None, reference_label: str) -> dict[str, Any]:
+    if not values or reference is None or reference <= 0:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": f"Sem {reference_label} numérico ou amostras reais válidas.",
+        }
+    ratios = [value / reference for value in values if value is not None and value > 0]
+    if not ratios:
+        return {
+            "applicable": False,
+            "test_label": "Não aplicável",
+            "reason": "Sem razões positivas para comparação inferencial.",
+        }
+
+    exceedance_count = sum(1 for ratio in ratios if ratio > 1.0)
+    exceedance_rate = exceedance_count / len(ratios)
+    ci_low, ci_high = _binomial_confidence_interval(exceedance_count, len(ratios))
+    ratio_summary = _stats_summary_with_text(ratios)
+
+    shapiro_w = None
+    shapiro_p = None
+    statistic = None
+    p_value = None
+    normality_met = False
+    test_label = "Não aplicável"
+    reason = ""
+    if len(ratios) >= 3:
+        log_ratios = [math.log(ratio) for ratio in ratios]
+        try:
+            shapiro = stats.shapiro(log_ratios)
+            shapiro_w = float(shapiro.statistic)
+            shapiro_p = float(shapiro.pvalue)
+        except Exception:
+            pass
+        normality_met = shapiro_p is not None and shapiro_p >= 0.05
+        if normality_met:
+            test_label = "Teste t unilateral de uma amostra"
+            try:
+                test = stats.ttest_1samp(log_ratios, popmean=0.0, alternative="less")
+                statistic = float(test.statistic)
+                p_value = float(test.pvalue)
+            except Exception:
+                reason = "O teste t não produziu p-value válido."
+        else:
+            test_label = "Wilcoxon unilateral de uma amostra"
+            try:
+                test = stats.wilcoxon(log_ratios, alternative="less", zero_method="pratt")
+                statistic = float(test.statistic)
+                p_value = float(test.pvalue)
+            except Exception:
+                reason = "O Wilcoxon não produziu p-value válido."
+    else:
+        reason = "Menos de 3 amostras reais válidas para teste sobre log(valor/referência)."
+
+    p95_ratio = ratio_summary.get("p95")
+    if p_value is not None and p_value < 0.05 and p95_ratio is not None and p95_ratio < 1.0 and exceedance_count == 0:
+        conclusion = f"amostras reais calculadas ficaram estatisticamente abaixo de {reference_label}, sem ultrapassagem observada"
+    elif exceedance_count == 0:
+        conclusion = f"sem ultrapassagem observada; IC95% superior da taxa = {_format_percent(ci_high)}"
+    elif p_value is not None and p_value < 0.05 and p95_ratio is not None and p95_ratio < 1.0:
+        conclusion = f"tendência abaixo de {reference_label}, mas houve ultrapassagem observada"
+    else:
+        conclusion = f"não há evidência suficiente de margem estatística abaixo de {reference_label}"
+
+    return {
+        "applicable": p_value is not None,
+        "n": len(ratios),
+        "test_label": test_label,
+        "reason": reason,
+        "statistic": statistic,
+        "statistic_text": _stat_text(statistic),
+        "p_value": p_value,
+        "p_value_text": _format_p_value(p_value),
+        "shapiro_w": shapiro_w,
+        "shapiro_p": shapiro_p,
+        "shapiro_p_text": _format_p_value(shapiro_p),
+        "normality_met": normality_met,
+        "ratio_summary": ratio_summary,
+        "p95_ratio": p95_ratio,
+        "p95_ratio_text": _stat_text(p95_ratio),
+        "exceedance_count": exceedance_count,
+        "exceedance_rate": exceedance_rate,
+        "exceedance_rate_text": _format_percent(exceedance_rate),
+        "exceedance_ci95_low": ci_low,
+        "exceedance_ci95_low_text": _format_percent(ci_low),
+        "exceedance_ci95_high": ci_high,
+        "exceedance_ci95_high_text": _format_percent(ci_high),
+        "exceedance_ci95_text": f"{_format_percent(ci_low)} - {_format_percent(ci_high)}",
+        "conclusion": conclusion,
     }
 
 
@@ -864,14 +967,14 @@ def _empirical_radionuclide_rows(
     return rows
 
 
-def _empirical_modeled_compartment_rows(
+def _empirical_modeled_sample_values(
     scenario: dict[str, Any],
     grouped: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+) -> dict[tuple[str, str, str], list[float]]:
     scenario_rows = _scenario_row_by_radionuclide(scenario)
     flow = (scenario.get("totals") or {}).get("circulation_flow_m3_year") or DEFAULT_DILUTION_FLOW_M3_YEAR
     sample_values: dict[tuple[str, str, str], list[float]] = {}
-    for group in EMPIRICAL_ACTIVITY_GROUPS:
+    for group in grouped:
         for radionuclide in scenario_rows:
             for compartment in COMPARTMENTS:
                 sample_values[(group, radionuclide, compartment["key"])] = []
@@ -899,9 +1002,20 @@ def _empirical_modeled_compartment_rows(
                     if multiplier is None:
                         continue
                     sample_values[(group, radionuclide, compartment["key"])].append(water_value * multiplier)
+    return sample_values
+
+
+def _empirical_modeled_compartment_rows(
+    scenario: dict[str, Any],
+    grouped: dict[str, list[dict[str, Any]]],
+    sample_values: dict[tuple[str, str, str], list[float]] | None = None,
+) -> list[dict[str, Any]]:
+    scenario_rows = _scenario_row_by_radionuclide(scenario)
+    if sample_values is None:
+        sample_values = _empirical_modeled_sample_values(scenario, grouped)
 
     rows: list[dict[str, Any]] = []
-    for group in EMPIRICAL_ACTIVITY_GROUPS:
+    for group in grouped:
         for radionuclide in EXPECTED_RADIONUCLIDES:
             scenario_row = scenario_rows.get(radionuclide)
             if not scenario_row:
@@ -942,14 +1056,60 @@ def _empirical_modeled_compartment_rows(
     return rows
 
 
+def _empirical_inferential_rows(
+    scenario: dict[str, Any],
+    grouped: dict[str, list[dict[str, Any]]],
+    sample_values: dict[tuple[str, str, str], list[float]],
+) -> list[dict[str, Any]]:
+    scenario_rows = _scenario_row_by_radionuclide(scenario)
+    rows: list[dict[str, Any]] = []
+    for group in grouped:
+        for radionuclide in EXPECTED_RADIONUCLIDES:
+            scenario_row = scenario_rows.get(radionuclide)
+            if not scenario_row:
+                continue
+            for compartment in COMPARTMENTS:
+                key = compartment["key"]
+                values = sample_values.get((group, radionuclide, key), [])
+                base_data = scenario_row["compartments"][key]
+                report_level = base_data.get("report_level")
+                if report_level is None:
+                    continue
+                inference = _real_reference_inference(values, report_level, "Report Level")
+                rows.append(
+                    {
+                        "group": group,
+                        "radionuclide": radionuclide,
+                        "compartment_key": key,
+                        "compartment": compartment["label"],
+                        "unit": compartment["unit"],
+                        "reference": "Report Level",
+                        "reference_value": report_level,
+                        "reference_value_text": _format_scientific(report_level),
+                        **inference,
+                    }
+                )
+    return rows
+
+
 def _build_empirical_activity_statistics(
     scenario: dict[str, Any],
     *,
     activity_workbook_path: str | Path,
 ) -> dict[str, Any]:
     loaded = _load_empirical_activity_records(activity_workbook_path)
-    records = loaded["records"]
-    grouped = _group_records(records)
+    loaded_records = loaded["records"]
+    records = [
+        record
+        for record in loaded_records
+        if record.get("group") in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS
+    ]
+    excluded_records = [
+        record
+        for record in loaded_records
+        if record.get("group") not in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS
+    ]
+    grouped = _group_records(records, EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS)
     modeled_radionuclides = set(_scenario_row_by_radionuclide(scenario))
     unmodeled_radionuclides = [
         radionuclide
@@ -958,21 +1118,32 @@ def _build_empirical_activity_statistics(
     ]
     group_summaries = _empirical_group_summaries(grouped)
     radionuclide_rows = _empirical_radionuclide_rows(grouped, modeled_radionuclides)
-    modeled_compartment_rows = _empirical_modeled_compartment_rows(scenario, grouped)
+    sample_values = _empirical_modeled_sample_values(scenario, grouped)
+    modeled_compartment_rows = _empirical_modeled_compartment_rows(scenario, grouped, sample_values)
+    inferential_rows = _empirical_inferential_rows(scenario, grouped, sample_values)
     group_counts = {summary["group"]: summary["sample_count"] for summary in group_summaries}
+    excluded_group_counts = {
+        group: sum(1 for record in excluded_records if record.get("group") == group)
+        for group in EMPIRICAL_ACTIVITY_GROUPS
+        if group not in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS
+    }
     narrative_text = (
-        "A estatística empírica usa as medições reais de atividade total TAR de 2019 a 2023, separando TAR - Afluente "
-        "e TAR - Efluente. Valores marcados como < MDA> são tratados como censurados: entram nas contagens de não "
-        "detectados, mas não entram como valor numérico. Para cada amostra com A-TAR numérico, a fração Si foi calculada "
-        "a partir dos radionuclídeos detectados e aplicada à atividade total; em seguida, foram reutilizados a vazão e "
-        "os fatores de água, peixe, invertebrado e sedimento da planilha TAR selecionada."
+        "A estatística empírica usa somente as medições reais de atividade total do TAR - Afluente de 2019 a 2023. "
+        "Valores marcados como < MDA> são tratados como censurados: entram nas contagens de não detectados, mas não "
+        "entram como valor numérico. Para cada amostra com A-TAR numérico, a fração Si foi calculada a partir dos "
+        "radionuclídeos detectados e aplicada à atividade total; em seguida, foram reutilizados a vazão e os fatores "
+        "de água, peixe, invertebrado e sedimento da planilha TAR selecionada. A inferência compara os resultados "
+        "calculados por amostra com o Report Level como referência fixa."
     )
     return {
         "synthetic": False,
         "source_workbook_path": loaded["path"],
         "source_sheet": loaded["sheet"],
-        "source_note": "Dados reais de atividade total TAR; < MDA> tratado como dado censurado.",
+        "source_note": "Dados reais de atividade total TAR - Afluente; < MDA> tratado como dado censurado.",
         "mda_policy": "< MDA> não é convertido para zero nem MDA/2; é contado como censurado e excluído dos cálculos numéricos.",
+        "included_groups": EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS,
+        "excluded_groups": [group for group in EMPIRICAL_ACTIVITY_GROUPS if group not in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS],
+        "excluded_group_counts": excluded_group_counts,
         "groups": group_summaries,
         "group_counts": group_counts,
         "observed_radionuclides": EMPIRICAL_ACTIVITY_RADIONUCLIDES,
@@ -980,11 +1151,12 @@ def _build_empirical_activity_statistics(
         "unmodeled_radionuclides": unmodeled_radionuclides,
         "radionuclide_rows": radionuclide_rows,
         "modeled_compartment_rows": modeled_compartment_rows,
+        "inferential_rows": inferential_rows,
         "narrative_text": narrative_text,
         "cards": [
             {"label": "Amostras afluente", "value": _format_count(group_counts.get("TAR - Afluente", 0))},
-            {"label": "Amostras efluente", "value": _format_count(group_counts.get("TAR - Efluente", 0))},
             {"label": "Política MDA", "value": "censurado"},
+            {"label": "Inferência", "value": "Report Level fixo"},
             {"label": "Observado não modelado", "value": ", ".join(unmodeled_radionuclides) or "—"},
         ],
     }
@@ -1010,7 +1182,7 @@ def _reference_test(values: list[float], reference: float | None, reference_labe
         return {
             "applicable": False,
             "test_label": "Não aplicável",
-            "reason": "Menos de 3 replicações sintéticas exploratórias válidas.",
+            "reason": "Menos de 3 valores válidos.",
             "n": len(ratios),
         }
 
@@ -1047,7 +1219,7 @@ def _reference_test(values: list[float], reference: float | None, reference_labe
     ratio_summary = _stats_summary_with_text(ratios)
     exceedance_count = sum(1 for ratio in ratios if ratio > 1.0)
     conclusion = (
-        f"{dataset_label} ficou abaixo de {reference_label} nas replicações sintéticas exploratórias"
+        f"{dataset_label} ficou abaixo de {reference_label} nos valores avaliados"
         if p_value is not None and p_value < 0.05 and (ratio_summary["p95"] or 0) < 1.0
         else f"{dataset_label} não sustenta margem estatística exploratória abaixo de {reference_label}"
     )
@@ -1083,7 +1255,7 @@ def _paired_calculated_erica_test(calculated_values: list[float], erica_values: 
         return {
             "applicable": False,
             "test_label": "Não aplicável",
-            "reason": "Menos de 3 pares sintéticos exploratórios válidos.",
+            "reason": "Menos de 3 pares válidos.",
             "n": len(pairs),
         }
     log_ratios = [math.log(calculated / erica) for calculated, erica in pairs]
@@ -1141,7 +1313,7 @@ def _paired_calculated_erica_test(calculated_values: list[float], erica_values: 
         "ci95_low_text": _stat_text(math.exp(mean_log - ci_half_width)),
         "ci95_high": math.exp(mean_log + ci_half_width),
         "ci95_high_text": _stat_text(math.exp(mean_log + ci_half_width)),
-        "conclusion": "Comparação exploratória entre cálculo por fórmula e ERICA Tool; não constitui validação regulatória final.",
+        "conclusion": "Comparação pareada exploratória entre cálculo por fórmula e ERICA Tool; não constitui validação regulatória final.",
     }
 
 
@@ -1154,8 +1326,13 @@ def _build_statistical_comparison(scenario: dict[str, Any], *, sample_count: int
     erica_rows: list[dict[str, Any]] = []
     norm_rows: list[dict[str, Any]] = []
     descriptive_rows: list[dict[str, Any]] = []
-    inferential_rows: list[dict[str, Any]] = []
     paired_comparison_rows: list[dict[str, Any]] = []
+    comparison_values: dict[tuple[str, str], list[float]] = {}
+    paired_values: dict[str, dict[str, list[float]]] = {
+        "Todos os compartimentos": {"calculated": [], "erica": []}
+    }
+    for compartment in COMPARTMENTS:
+        paired_values[compartment["label"]] = {"calculated": [], "erica": []}
 
     for row in scenario.get("rows") or []:
         radionuclide = row["radionuclide"]
@@ -1204,80 +1381,70 @@ def _build_statistical_comparison(scenario: dict[str, Any], *, sample_count: int
                     }
                 )
 
-            for dataset_key, dataset_label, base_value in (
-                ("calculado", "Calculado por fórmulas", calculated_value),
-                ("erica", "Simulado pelo ERICA Tool", erica_value),
+            for dataset_label, base_value in (
+                ("Calculado por fórmulas", calculated_value),
+                ("Estimado pelo ERICA Tool", erica_value),
             ):
-                rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:{dataset_key}")
-                replicates = _synthetic_replicates(base_value, sample_count, rng)
-                if replicates:
-                    descriptive_rows.append(
-                        {
-                            "dataset": dataset_label,
-                            "radionuclide": radionuclide,
-                            "compartment_key": key,
-                            "compartment": compartment["label"],
-                            "unit": compartment["unit"],
-                            "base_value": base_value,
-                            "base_value_text": _format_scientific(base_value),
-                            **_stats_summary_with_text(replicates),
-                        }
-                    )
-                for reference_key, reference_label in (("report_level", "Report Level"), ("lld", "LLD")):
-                    reference_value = data.get(reference_key)
-                    if reference_value is None or not replicates:
-                        continue
-                    test_result = _reference_test(replicates, reference_value, reference_label, dataset_label)
-                    test_result.update(
-                        {
-                            "dataset": dataset_label,
-                            "radionuclide": radionuclide,
-                            "compartment_key": key,
-                            "compartment": compartment["label"],
-                            "reference": reference_label,
-                            "reference_value": reference_value,
-                            "reference_value_text": _format_scientific(reference_value),
-                        }
-                    )
-                    inferential_rows.append(test_result)
+                if base_value is not None:
+                    comparison_values.setdefault((dataset_label, compartment["label"]), []).append(base_value)
 
-            calculated_rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:paired:calculated")
-            erica_rng = random.Random(f"{seed}:{scenario.get('key')}:{radionuclide}:{key}:paired:erica")
-            calculated_replicates = _synthetic_replicates(calculated_value, sample_count, calculated_rng)
-            erica_replicates = _synthetic_replicates(erica_value, sample_count, erica_rng)
-            if calculated_replicates and erica_replicates:
-                paired = _paired_calculated_erica_test(calculated_replicates, erica_replicates)
-                paired.update(
-                    {
-                        "radionuclide": radionuclide,
-                        "compartment_key": key,
-                        "compartment": compartment["label"],
-                        "unit": compartment["unit"],
-                        "calculated_value": calculated_value,
-                        "calculated_value_text": _format_scientific(calculated_value),
-                        "erica_value": erica_value,
-                        "erica_value_text": _format_scientific(erica_value),
-                    }
-                )
-                paired_comparison_rows.append(paired)
+            if calculated_value is not None and erica_value is not None and calculated_value > 0 and erica_value > 0:
+                paired_values["Todos os compartimentos"]["calculated"].append(calculated_value)
+                paired_values["Todos os compartimentos"]["erica"].append(erica_value)
+                paired_values[compartment["label"]]["calculated"].append(calculated_value)
+                paired_values[compartment["label"]]["erica"].append(erica_value)
+
+    for (dataset_label, compartment_label), values in comparison_values.items():
+        compartment = next((item for item in COMPARTMENTS if item["label"] == compartment_label), None)
+        descriptive_rows.append(
+            {
+                "dataset": dataset_label,
+                "radionuclide": "Todos",
+                "compartment_key": (compartment or {}).get("key", ""),
+                "compartment": compartment_label,
+                "unit": (compartment or {}).get("unit", ""),
+                "base_value": None,
+                "base_value_text": "—",
+                **_stats_summary_with_text(values),
+            }
+        )
+
+    for scope, values in paired_values.items():
+        paired = _paired_calculated_erica_test(values["calculated"], values["erica"])
+        paired.update(
+            {
+                "scope": scope,
+                "radionuclide": "Todos",
+                "compartment_key": "" if scope == "Todos os compartimentos" else next((item["key"] for item in COMPARTMENTS if item["label"] == scope), ""),
+                "compartment": scope,
+                "unit": "razão",
+                "calculated_value": None,
+                "calculated_value_text": f"{len(values['calculated'])} pares",
+                "erica_value": None,
+                "erica_value_text": f"{len(values['erica'])} pares",
+            }
+        )
+        paired_comparison_rows.append(paired)
 
     narrative_text = (
-        f"A análise estatística usa {sample_count} replicações sintéticas exploratórias por valor base, com seed {seed}. "
-        "Os dados calculados vêm das fórmulas de transporte/incorporação da planilha TAR; os dados simulados vêm do "
-        "ERICA Tool Nível 2; Report Level e LLD permanecem como referências normativas fixas. As replicações não são "
-        "medições reais e não sustentam conclusão regulatória isolada."
+        "A comparação estatística entre fórmula TAR, ERICA Tool e norma não usa replicações aleatórias. "
+        "Os dados calculados vêm das fórmulas de transporte/incorporação da planilha TAR; os dados do ERICA Tool são "
+        "estimativas de visualização até a substituição por saídas reais; Report Level e LLD permanecem como referências "
+        "normativas fixas e não entram como amostras."
     )
     return {
         "sample_count": sample_count,
         "seed": seed,
-        "synthetic": True,
-        "source_note": "replicações sintéticas exploratórias geradas para análise estatística; não são medições reais.",
+        "synthetic": False,
+        "random_replicates_used": False,
+        "erica_estimated": True,
+        "source_note": "sem replicações aleatórias; ERICA Tool mantido como estimativa visual pareada.",
         "erica_source": "Artigo TAR1 correção.pdf, tabela/screenshot do ERICA Tool Nível 2.",
         "calculated_rows": calculated_rows,
         "erica_rows": erica_rows,
         "norm_rows": norm_rows,
         "descriptive_rows": descriptive_rows,
-        "inferential_rows": inferential_rows,
+        "inferential_rows": [],
         "paired_comparison_rows": paired_comparison_rows,
         "narrative_text": narrative_text,
     }
@@ -1536,6 +1703,46 @@ def _inferential_assessment() -> dict[str, Any]:
     }
 
 
+def _empirical_inferential_assessment(empirical: dict[str, Any]) -> dict[str, Any]:
+    rows = empirical.get("inferential_rows") or []
+    applicable = [row for row in rows if row.get("applicable")]
+    if not rows:
+        return _inferential_assessment()
+    exceedance_rows = [row for row in rows if int(row.get("exceedance_count") or 0) > 0]
+    if applicable and not exceedance_rows:
+        status = "inferência real aplicável"
+        reason = (
+            "Há amostras reais do TAR - Afluente suficientes para testes sobre log(valor/Report Level) em parte dos "
+            "radionuclídeos e compartimentos. O Report Level é tratado como referência fixa; os p-values descrevem "
+            "as amostras reais calculadas pela fórmula, não a norma."
+        )
+    elif applicable:
+        status = "inferência real com ressalvas"
+        reason = (
+            "Há testes aplicáveis com dados reais do TAR - Afluente, mas existem ultrapassagens observadas em pelo "
+            "menos um contraste. A conclusão deve priorizar as frequências reais e seus IC95% binomiais."
+        )
+    else:
+        status = "inferência real limitada"
+        reason = (
+            "Os dados reais do TAR - Afluente foram calculados por amostra, mas os contrastes disponíveis não atingiram "
+            "condição suficiente para p-value em todos os casos. A leitura principal permanece descritiva, com frequência "
+            "de ultrapassagem e IC95% binomial."
+        )
+    return {
+        "applicable": bool(applicable),
+        "status": status,
+        "reason": reason,
+        "current_n": max([int(row.get("n") or 0) for row in rows] + [0]),
+        "sample_unit": "amostra real do TAR - Afluente calculada por fórmula",
+        "recommended_action": (
+            "Manter a coleta de amostras independentes do TAR - Afluente e substituir os valores estimados do ERICA "
+            "Tool por saídas reais quando disponíveis."
+        ),
+        "minimums": INFERENTIAL_TEST_MINIMUMS,
+    }
+
+
 def load_tar_workbook_model(
     workbook_path: str | Path,
     *,
@@ -1597,11 +1804,6 @@ def build_tar_summary(
     )
     scenario_key = resolve_tar_scenario_key(scenario)
     scenario_model = dict(model["scenarios"][scenario_key])
-    scenario_model["sensitivity"] = _build_sensitivity_analysis(
-        scenario_model,
-        sample_count=resolved_sensitivity_n,
-        seed=resolved_sensitivity_seed,
-    )
     scenario_model["statistical_comparison"] = _build_statistical_comparison(
         scenario_model,
         sample_count=resolved_stat_n,
@@ -1612,6 +1814,8 @@ def build_tar_summary(
         scenario_model,
         activity_workbook_path=resolved_activity_path,
     )
+    scenario_model["sensitivity"] = {}
+    inferential_assessment = _empirical_inferential_assessment(scenario_model["empirical_activity_statistics"])
     return {
         "ok": True,
         "workbook_path": model["workbook_path"],
@@ -1622,5 +1826,5 @@ def build_tar_summary(
             for key, value in SCENARIOS.items()
         ],
         "scenario": scenario_model,
-        "inferential_assessment": model["inferential_assessment"],
+        "inferential_assessment": inferential_assessment,
     }

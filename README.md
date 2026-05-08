@@ -18,6 +18,8 @@ Parâmetros opcionais:
 - `stat_n=60`
 - `stat_seed=20260504`
 
+Os parâmetros estatísticos permanecem aceitos por compatibilidade, mas o relatório principal não usa replicações aleatórias. A inferência atual usa somente as amostras reais do `TAR - Afluente` da planilha de atividade total; o `TAR - Efluente` é ignorado na análise.
+
 ## Execução local
 
 ```powershell

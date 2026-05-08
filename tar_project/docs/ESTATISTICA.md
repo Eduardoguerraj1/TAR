@@ -6,7 +6,7 @@ Os valores de concentração da água do Tanque de Água de Recarregamento (TAR)
 
 Esses valores medidos alimentam a simulação de transporte para os compartimentos ambientais avaliados: água do mar, peixe, invertebrado e sedimento. Assim, cada conjunto de medições do TAR pode gerar uma nova simulação. Quando houver n medições independentes ou n campanhas com resultados válidos, o projeto poderá produzir n simulações e comparar a distribuição dos resultados simulados com os limites de referência da norma, Report Level e LLD, quando aplicável.
 
-Na planilha atual, existe apenas um conjunto consolidado de entrada por cenário. Por isso, a análise implementada no módulo TAR v1 é descritiva e determinística. O n = 8 corresponde aos radionuclídeos avaliados, não ao número de amostras ambientais ou medições independentes.
+Na implementação atual, a base inferencial vem da planilha `Atividade Total TAR c radionuclideos.xls`, usando somente o grupo `TAR - Afluente`. O grupo `TAR - Efluente` não entra nos cálculos, tabelas ou testes. Valores marcados como `< MDA>` são tratados como censurados: entram nas contagens, mas não são convertidos para zero nem para MDA/2.
 
 ## O que pode ser feito com a planilha atual
 
@@ -18,9 +18,9 @@ Com a base atual, já é tecnicamente adequado:
 - identificar valores abaixo, acima ou sem referência;
 - comparar os cenários A1 e A1 e A2;
 - apresentar margem de segurança em relação aos limites normativos disponíveis;
-- registrar que testes inferenciais não são aplicáveis enquanto houver apenas uma simulação consolidada por cenário.
+- aplicar inferência aos resultados calculados por amostra real do `TAR - Afluente`, quando houver n suficiente por radionuclídeo e compartimento.
 
-Essa etapa responde se o cenário calculado ultrapassa os limites cadastrados, mas ainda não responde qual é a variabilidade estatística esperada quando a concentração da água do TAR é medida repetidas vezes.
+Essa etapa responde se os resultados calculados a partir das amostras reais ultrapassam os limites cadastrados e qual é a incerteza da frequência observada de ultrapassagem.
 
 ## O que muda quando houver n medições do TAR
 
@@ -40,9 +40,9 @@ Cada linha de entrada deve conter, no mínimo:
 
 Com esses dados, o projeto poderá gerar uma simulação para cada medição ou campanha. O resultado principal deixará de ser um único valor calculado e passará a ser uma distribuição de concentrações simuladas por radionuclídeo e compartimento.
 
-## Aba de cenário hipotético
+## Cenário hipotético
 
-O módulo TAR inclui a aba `Cenário hipotético`. Essa aba não altera a planilha original. Ela usa os valores atuais como base e gera medições sintéticas da água do TAR por espectrometria gama.
+O módulo ainda mantém o cenário hipotético como recurso técnico separado, mas ele não é a base estatística do relatório principal. A análise principal deve usar as amostras reais do `TAR - Afluente`.
 
 Cada medição sintética alimenta uma nova simulação. O painel passa a mostrar:
 
@@ -53,7 +53,7 @@ Cada medição sintética alimenta uma nova simulação. O painel passa a mostra
 - teste estatístico utilizado;
 - texto explicando a escolha do teste.
 
-A geração é pseudoaleatória e reprodutível por `seed`. Isso permite repetir exatamente o mesmo cenário hipotético quando necessário.
+A geração hipotética é pseudoaleatória e reprodutível por `seed`, quando esse cenário for selecionado explicitamente.
 
 ## Estatística recomendada para o TAR
 
@@ -62,7 +62,7 @@ A comparação principal deve continuar sendo contra os limites da norma. O pont
 Análises recomendadas:
 
 - estatística descritiva das concentrações medidas no TAR: n, média, mediana, desvio-padrão, mínimo, máximo e percentis;
-- propagação das medições para n simulações, preservando a ligação entre medição de entrada e resultado simulado;
+- propagação das medições reais do `TAR - Afluente` pela fórmula da planilha, preservando a ligação entre amostra de entrada e resultado calculado;
 - razão simulada/limite para cada radionuclídeo e compartimento;
 - percentil 95 ou 97,5 das simulações como estimativa conservadora;
 - intervalo de confiança unilateral superior para a média ou para o percentil, quando houver n suficiente;
@@ -72,13 +72,13 @@ Análises recomendadas:
 
 Testes como Shapiro-Wilk, teste t, Wilcoxon, ANOVA, Kruskal-Wallis e Friedman só entram se houver uma pergunta comparativa clara, por exemplo comparar cenários, campanhas, períodos, usinas ou métodos de medição. Para a pergunta principal do TAR, a leitura mais importante é a comparação da distribuição simulada com os limites normativos.
 
-No cenário hipotético implementado, a comparação inferencial usa o logaritmo da razão entre valor simulado e Report Level. O Shapiro-Wilk verifica a normalidade dessas razões. Quando a normalidade é atendida, aplica-se teste t unilateral de uma amostra. Quando a normalidade não é atendida, aplica-se Wilcoxon unilateral de uma amostra. A hipótese alternativa é que os resultados simulados permaneçam abaixo do Report Level.
+Na análise real implementada, a comparação inferencial usa o logaritmo da razão entre valor calculado por amostra e Report Level. O Shapiro-Wilk verifica a normalidade dessas razões. Quando a normalidade é atendida, aplica-se teste t unilateral de uma amostra. Quando a normalidade não é atendida, aplica-se Wilcoxon unilateral de uma amostra. A hipótese alternativa é que os resultados calculados permaneçam abaixo do Report Level, tratado como referência fixa.
 
-## Análise de sensibilidade Monte Carlo
+## Comparação com ERICA Tool
 
-O módulo inclui uma análise de sensibilidade demonstrativa, separada do teste inferencial. Essa etapa usa 10.000 simulações por padrão e aplica multiplicadores sintéticos sobre os resultados atuais para atividade total do TAR, vazão de diluição, bioacumulação em peixes e invertebrados, transferência para sedimento e tempo de exposição.
+Os valores do ERICA Tool podem ser usados como estimativa visual enquanto as saídas reais não forem fornecidas. A comparação pareada usa os pares radionuclídeo-compartimento calculados pela fórmula e estimados pelo ERICA. Essa comparação é exploratória e não substitui validação regulatória.
 
-Os intervalos são sintéticos e servem para triagem exploratória das variáveis mais influentes. Eles não substituem fatores de bioacumulação, Kd/Kc, constantes de decaimento ou tempos de exposição obtidos em literatura técnica.
+Report Level e LLD permanecem referências fixas. Eles não são amostras, não são randomizados e não entram como observações nos testes.
 
 ## Mínimos práticos de amostra
 
@@ -98,6 +98,4 @@ Os mínimos abaixo orientam a coleta futura:
 
 ## Conclusão operacional
 
-Com os arquivos atuais, o módulo TAR deve permanecer descritivo: uma simulação consolidada por cenário, comparação com Report Level e LLD e indicação de que não há base amostral para inferência.
-
-Com medições repetidas da água do TAR, o próximo passo estatístico será transformar cada medição em uma simulação, gerar a distribuição dos resultados por compartimento ambiental e comparar essa distribuição com os limites normativos. Essa abordagem é mais adequada ao objetivo do TAR do que aplicar automaticamente testes de diferença entre grupos.
+Com os arquivos atuais, o módulo TAR usa o `TAR - Afluente` como base amostral real, transforma cada amostra válida em resultado por compartimento e compara a distribuição calculada com o Report Level fixo. A leitura principal combina estatística descritiva, frequência de ultrapassagem, IC95% binomial e p-value quando o n permite teste sobre log(valor/Report Level).

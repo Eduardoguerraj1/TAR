@@ -8,7 +8,7 @@ Este pacote concentra o módulo TAR separado do fluxo principal da UAS.
 - carregar a planilha empírica `Atividade Total TAR c radionuclideos.xls` ou o caminho definido por `TAR_ACTIVITY_WORKBOOK_PATH`;
 - tratar `A1` e `A1 e A2` como cenários de cálculo;
 - consolidar concentrações por radionuclídeo e compartimento ambiental;
-- complementar a estatística com dados reais de atividade total TAR separados em afluente e efluente;
+- complementar a estatística com dados reais de atividade total TAR usando somente `TAR - Afluente`;
 - comparar resultados com Report Level e LLD disponíveis;
 - gerar dashboard, preview HTML e exportações DOCX/PDF do TAR;
 - manter a avaliação estatística do TAR separada da lógica estatística da UAS.
@@ -24,7 +24,7 @@ Este pacote concentra o módulo TAR separado do fluxo principal da UAS.
 
 O arquivo `tar_app.py` é a entrada dedicada para publicar o TAR como serviço Render separado. Nesse modo, a raiz do serviço (`/`) redireciona para `/tar/artigo-beta`, mantendo o link do UAS independente.
 
-O cenário `hipotetico` aceita os parâmetros opcionais `n` e `seed`. Todas as rotas TAR também aceitam `sensitivity_n` e `sensitivity_seed` para a análise de sensibilidade Monte Carlo.
+O cenário `hipotetico` aceita os parâmetros opcionais `n` e `seed`. As rotas TAR mantêm `sensitivity_n` e `sensitivity_seed` por compatibilidade, mas o relatório principal não usa análise aleatória de sensibilidade.
 
 Exemplo:
 
@@ -34,12 +34,10 @@ Exemplo:
 
 Esse cenário não altera a planilha Excel. Ele usa os valores atuais como base, gera medições sintéticas da água do TAR por espectrometria gama e propaga essas entradas para novas simulações.
 
-O ARTIGO BETA separa dados calculados por fórmulas, dados simulados pelo ERICA Tool e normas de comparação. As replicações sintéticas exploratórias usadas na estatística servem apenas para atingir N analítico e não substituem medições reais nem conclusão regulatória.
+O ARTIGO BETA separa dados calculados por fórmulas, dados estimados pelo ERICA Tool e normas de comparação. A inferência principal usa as amostras reais do `TAR - Afluente`; Report Level e LLD permanecem referências fixas.
 
 ## Documentação estatística
 
 A premissa estatística do TAR está em `tar_project/docs/ESTATISTICA.md`.
 
-O ponto principal é que os valores da água do TAR podem ser medições reais obtidas por espectrometria gama. Quando houver n medições independentes, cada medição poderá alimentar uma simulação, permitindo comparar a distribuição dos resultados simulados com os limites normativos.
-
-Enquanto houver apenas uma planilha consolidada por cenário, a análise permanece descritiva e determinística.
+O ponto principal é que os valores da água do TAR são tratados como medições reais obtidas por espectrometria gama. Cada amostra válida do `TAR - Afluente` alimenta o cálculo por fórmula, permitindo comparar a distribuição dos resultados calculados com o Report Level fixo.

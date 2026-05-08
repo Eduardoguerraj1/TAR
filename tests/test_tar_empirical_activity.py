@@ -21,14 +21,16 @@ def test_empirical_activity_statistics_reads_real_xls_by_group() -> None:
 
     assert empirical["synthetic"] is False
     assert empirical["group_counts"]["TAR - Afluente"] == 301
-    assert empirical["group_counts"]["TAR - Efluente"] == 20
+    assert "TAR - Efluente" not in empirical["group_counts"]
+    assert empirical["excluded_group_counts"]["TAR - Efluente"] == 20
+    assert empirical["included_groups"] == ["TAR - Afluente"]
     assert "Nb-95" in empirical["observed_radionuclides"]
     assert empirical["unmodeled_radionuclides"] == ["Nb-95"]
     assert "< MDA>" in empirical["mda_policy"]
 
     cr51_rows = [row for row in empirical["radionuclide_rows"] if row["radionuclide"] == "Cr-51"]
     assert cr51_rows
-    assert sum(row["censored_count"] for row in cr51_rows) == 198
+    assert sum(row["censored_count"] for row in cr51_rows) == 197
 
 
 def test_empirical_activity_applies_tar_formula_to_modeled_compartments() -> None:
@@ -51,6 +53,13 @@ def test_empirical_activity_applies_tar_formula_to_modeled_compartments() -> Non
     assert co58_water["lld"] == 560.0
     assert co58_water["report_level_status"] in {"abaixo", "acima"}
 
+    assert not any(row["group"] == "TAR - Efluente" for row in modeled_rows)
+    inferential_rows = empirical["inferential_rows"]
+    assert inferential_rows
+    assert all(row["group"] == "TAR - Afluente" for row in inferential_rows)
+    assert all(row["reference"] == "Report Level" for row in inferential_rows)
+    assert any(row["exceedance_ci95_text"] != "—" for row in inferential_rows)
+
 
 def test_api_and_article_beta_include_empirical_activity_section() -> None:
     client = tar_app.app.test_client()
@@ -65,14 +74,16 @@ def test_api_and_article_beta_include_empirical_activity_section() -> None:
     assert response.status_code == 200
     assert empirical["synthetic"] is False
     assert empirical["group_counts"]["TAR - Afluente"] == 301
-    assert empirical["group_counts"]["TAR - Efluente"] == 20
+    assert "TAR - Efluente" not in empirical["group_counts"]
+    assert empirical["inferential_rows"]
 
     article = client.get("/tar/artigo-beta?scenario=a1&sensitivity_n=100&stat_n=10")
     text = article.get_data(as_text=True)
     assert article.status_code == 200
     assert "Dados reais de atividade total TAR" in text
     assert "TAR - Afluente" in text
-    assert "TAR - Efluente" in text
+    assert "TAR - Efluente" not in text
+    assert "Inferência com dados reais do TAR - Afluente" in text
     assert "&lt; MDA" in text
 
 

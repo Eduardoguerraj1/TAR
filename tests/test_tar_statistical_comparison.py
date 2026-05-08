@@ -11,13 +11,14 @@ def test_api_includes_calculated_erica_norm_and_statistical_rows() -> None:
 
     assert statistical["sample_count"] == 60
     assert statistical["seed"] == 123
-    assert statistical["synthetic"] is True
-    assert "replicações sintéticas exploratórias" in statistical["source_note"]
+    assert statistical["synthetic"] is False
+    assert statistical["random_replicates_used"] is False
+    assert "sem replicações aleatórias" in statistical["source_note"]
     assert statistical["calculated_rows"]
     assert statistical["erica_rows"]
     assert statistical["norm_rows"]
     assert statistical["descriptive_rows"]
-    assert statistical["inferential_rows"]
+    assert statistical["inferential_rows"] == []
     assert statistical["paired_comparison_rows"]
 
 
@@ -29,8 +30,8 @@ def test_statistical_comparison_is_reproducible_with_same_seed() -> None:
     second_stat = second["scenario"]["statistical_comparison"]
 
     assert first_stat["descriptive_rows"][0]["p95_text"] == second_stat["descriptive_rows"][0]["p95_text"]
-    assert first_stat["inferential_rows"][0]["p_value_text"] == second_stat["inferential_rows"][0]["p_value_text"]
     assert first_stat["paired_comparison_rows"][0]["median_ratio_text"] == second_stat["paired_comparison_rows"][0]["median_ratio_text"]
+    assert first_stat["paired_comparison_rows"][0]["p_value_text"] == second_stat["paired_comparison_rows"][0]["p_value_text"]
 
 
 def test_article_beta_shows_correct_statistical_framing() -> None:
@@ -46,7 +47,8 @@ def test_article_beta_shows_correct_statistical_framing() -> None:
     assert "Normas: Report Level e LLD" in text
     assert "estatística descritiva" in text
     assert "estatística inferencial" in text
-    assert "replicações sintéticas exploratórias" in text
+    assert "sem replicações aleatórias" in text
+    assert "Inferência com dados reais do TAR - Afluente" in text
     assert "Análise de sensibilidade Monte Carlo" not in text
     assert "P95 simulado / Report Level" not in text
 
@@ -64,3 +66,5 @@ def test_flask_api_and_healthz_remain_available() -> None:
     assert payload["ok"] is True
     assert payload["scenario"]["statistical_comparison"]["sample_count"] == 60
     assert payload["scenario"]["statistical_comparison"]["seed"] == 123
+    assert payload["scenario"]["sensitivity"] == {}
+    assert payload["inferential_assessment"]["sample_unit"] == "amostra real do TAR - Afluente calculada por fórmula"

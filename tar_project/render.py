@@ -671,7 +671,7 @@ def _stat_source_rows_table(statistical: dict[str, Any], rows_key: str, caption:
         caption,
         header,
         "".join(rows),
-        "Os valores normativos são fixos; os valores calculados e ERICA são bases para replicações sintéticas exploratórias.",
+        "Os valores normativos são fixos; os valores calculados e ERICA são bases determinísticas ou estimadas, sem replicações aleatórias.",
         intro,
         table_key=table_keys.get(rows_key, ""),
     )
@@ -697,11 +697,11 @@ def _stat_descriptive_table(statistical: dict[str, Any]) -> str:
         )
     return _tar_table(
         "tar-table--dense",
-        "Estatística descritiva das replicações sintéticas exploratórias",
+        "Estatística descritiva dos valores calculados e estimados",
         "<tr><th>Conjunto</th><th>Radionuclídeo</th><th>Compartimento</th><th>n</th><th>Média</th><th>Mediana</th><th>Desvio-padrão</th><th>Q1</th><th>Q3</th><th>P95</th><th>CV</th></tr>",
         "".join(rows),
-        "As replicações sintéticas exploratórias aumentam N para análise estatística, mas não são medições reais.",
-        "Esta tabela apresenta estatística descritiva para os dados calculados por fórmulas e para os dados simulados pelo ERICA Tool. A norma não é randomizada: Report Level e LLD são referências fixas.",
+        "A estatística usa os valores disponíveis por radionuclídeo e compartimento; não há aumento artificial de N por sorteio.",
+        "Esta tabela apresenta estatística descritiva para os dados calculados por fórmulas e para os dados estimados pelo ERICA Tool. A norma não é randomizada: Report Level e LLD são referências fixas.",
         table_key="stat_descriptive",
     )
 
@@ -740,24 +740,23 @@ def _stat_paired_table(statistical: dict[str, Any]) -> str:
     for item in statistical.get("paired_comparison_rows") or []:
         rows.append(
             "<tr>"
-            f"<td>{escape(item.get('radionuclide') or '')}</td>"
+            f"<td>{escape(item.get('scope') or item.get('radionuclide') or '')}</td>"
             f"<td>{escape(item.get('compartment') or '')}</td>"
             f"<td>{escape(str(item.get('n') or '—'))}</td>"
-            f"<td>{escape(item.get('calculated_value_text') or '—')}</td>"
-            f"<td>{escape(item.get('erica_value_text') or '—')}</td>"
             f"<td>{escape(item.get('median_ratio_text') or '—')}</td>"
             f"<td>{escape(item.get('ci95_low_text') or '—')} - {escape(item.get('ci95_high_text') or '—')}</td>"
             f"<td>{escape(item.get('test_label') or '—')}</td>"
             f"<td>{escape(item.get('p_value_text') or '—')}</td>"
+            f"<td>{escape(item.get('conclusion') or item.get('reason') or '')}</td>"
             "</tr>"
         )
     return _tar_table(
         "tar-table--dense",
         "Comparação pareada: calculado por fórmulas vs ERICA Tool",
-        "<tr><th>Radionuclídeo</th><th>Compartimento</th><th>n</th><th>Calculado</th><th>ERICA</th><th>Mediana calculado/ERICA</th><th>IC95% da razão média</th><th>Teste</th><th>p-value</th></tr>",
+        "<tr><th>Escopo</th><th>Compartimento</th><th>n</th><th>Mediana calculado/ERICA</th><th>IC95% da razão média</th><th>Teste</th><th>p-value</th><th>Conclusão</th></tr>",
         "".join(rows),
-        "A comparação pareada usa log(calculado / ERICA) e tem finalidade exploratória, não validação regulatória final.",
-        "Esta tabela avalia a compatibilidade exploratória entre os resultados calculados pela planilha e os resultados simulados pelo ERICA Tool.",
+        "A comparação pareada usa log(calculado / ERICA) e tem finalidade exploratória; os valores do ERICA são estimativas visuais até substituição por saídas reais.",
+        "Esta tabela avalia a compatibilidade exploratória entre os resultados calculados pela planilha e os resultados estimados pelo ERICA Tool.",
         table_key="stat_paired",
     )
 
@@ -853,6 +852,36 @@ def _empirical_modeled_table(empirical: dict[str, Any]) -> str:
     )
 
 
+def _empirical_inferential_table(empirical: dict[str, Any]) -> str:
+    rows = []
+    for item in empirical.get("inferential_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('group') or '')}</td>"
+            f"<td>{escape(item.get('radionuclide') or '')}</td>"
+            f"<td>{escape(item.get('compartment') or '')}</td>"
+            f"<td>{escape(str(item.get('n') or '—'))}</td>"
+            f"<td>{escape(item.get('reference_value_text') or '—')}</td>"
+            f"<td>{escape(item.get('p95_ratio_text') or '—')}</td>"
+            f"<td>{escape(str(item.get('exceedance_count') if item.get('exceedance_count') is not None else '—'))}</td>"
+            f"<td>{escape(item.get('exceedance_rate_text') or '—')}</td>"
+            f"<td>{escape(item.get('exceedance_ci95_text') or '—')}</td>"
+            f"<td>{escape(item.get('test_label') or '—')}</td>"
+            f"<td>{escape(item.get('p_value_text') or '—')}</td>"
+            f"<td>{escape(item.get('conclusion') or item.get('reason') or '')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Inferência com dados reais do TAR - Afluente contra Report Level fixo",
+        "<tr><th>Grupo</th><th>Radionuclídeo</th><th>Compartimento</th><th>n</th><th>Report Level</th><th>P95 razão</th><th>Ultrapassagens</th><th>Freq. &gt; Report Level</th><th>IC95% freq.</th><th>Teste</th><th>p-value</th><th>Conclusão</th></tr>",
+        "".join(rows),
+        "O Report Level é referência fixa. O IC95% é binomial para a frequência observada de ultrapassagem; o p-value usa log(valor/Report Level) quando há n suficiente.",
+        "Esta tabela substitui as replicações aleatórias por inferência baseada nas amostras reais do TAR - Afluente calculadas pela fórmula da planilha.",
+        table_key="empirical_inferential",
+    )
+
+
 def _empirical_activity_panel(summary: dict[str, Any]) -> str:
     empirical = (summary.get("scenario") or {}).get("empirical_activity_statistics") or {}
     if not empirical:
@@ -862,11 +891,13 @@ def _empirical_activity_panel(summary: dict[str, Any]) -> str:
 <section class="panel">
   <h2>Dados reais de atividade total TAR</h2>
   <p>{escape(empirical.get('narrative_text') or '')}</p>
+  <p>A estatística inferencial desta seção usa somente amostras reais do TAR - Afluente calculadas pela fórmula; o Report Level permanece referência fixa.</p>
   <p class="table-note">Fonte: {escape(str(empirical.get('source_workbook_path') or ''))}, aba {escape(str(empirical.get('source_sheet') or ''))}. Radionuclídeos observados não modelados: {escape(unmodeled)}.</p>
   <div class="cards sensitivity-cards">{_empirical_cards(empirical)}</div>
   {_empirical_group_table(empirical)}
   {_empirical_radionuclide_table(empirical)}
   {_empirical_modeled_table(empirical)}
+  {_empirical_inferential_table(empirical)}
 </section>
 """
 
@@ -875,23 +906,24 @@ def _statistical_comparison_panel(summary: dict[str, Any]) -> str:
     statistical = (summary.get("scenario") or {}).get("statistical_comparison") or {}
     if not statistical:
         return ""
+    descriptive_html = _stat_descriptive_table(statistical) if statistical.get("descriptive_rows") else ""
+    paired_html = _stat_paired_table(statistical) if statistical.get("paired_comparison_rows") else ""
     return f"""
 <section class="panel">
   <h2>Estatística calculado vs ERICA vs norma</h2>
   <p>{escape(statistical.get('narrative_text') or '')}</p>
-  <p class="table-note">Todas as menções a N nesta seção se referem a replicações sintéticas exploratórias. Esses dados aleatórios não são medições reais e servem apenas para análise estatística exploratória.</p>
-  <p>A estatística descritiva resume dispersão, P95 e CV das replicações; a estatística inferencial compara essas replicações com Report Level e LLD sem transformar a norma em amostra.</p>
+  <p class="table-note">Esta seção não usa replicações aleatórias. A norma é referência fixa; os valores do ERICA Tool são estimativas para visualização até substituição por saídas reais.</p>
+  <p>A estatística descritiva resume dispersão, P95 e CV dos valores calculados e estimados por compartimento. A inferência contra norma fica na seção dos dados reais do TAR - Afluente.</p>
   <h3>Dados calculados por fórmulas</h3>
   {_stat_source_rows_table(statistical, "calculated_rows", "Dados calculados por fórmulas de transporte/incorporação", "A planilha TAR fornece concentrações calculadas por fórmulas e modelos de transporte para água, peixe, invertebrado e sedimento.")}
   <h3>Dados simulados pelo ERICA Tool</h3>
-  {_stat_source_rows_table(statistical, "erica_rows", "Dados simulados pelo ERICA Tool", "O ERICA Tool foi usado como simulação de dose/risco ambiental até o Nível 2. Água foi convertida de Bq/L para Bq/m³ quando necessário.")}
+  {_stat_source_rows_table(statistical, "erica_rows", "Dados simulados pelo ERICA Tool", "O ERICA Tool foi usado como estimativa de dose/risco ambiental até o Nível 2. Água foi convertida de Bq/L para Bq/m³ quando necessário.")}
   <h3>Normas: Report Level e LLD</h3>
   {_stat_source_rows_table(statistical, "norm_rows", "Normas: Report Level e LLD", "Report Level e LLD são referências normativas fixas e não entram como amostras aleatórias.")}
   <h3>Estatística descritiva</h3>
-  {_stat_descriptive_table(statistical)}
-  <h3>Estatística inferencial</h3>
-  {_stat_inferential_table(statistical)}
-  {_stat_paired_table(statistical)}
+  {descriptive_html}
+  <h3>Comparação pareada com ERICA Tool</h3>
+  {paired_html}
 </section>
 """
 
@@ -982,7 +1014,7 @@ def _summary_intro(summary: dict[str, Any]) -> str:
 def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
     scenario = summary["scenario"]
     assessment = summary["inferential_assessment"]
-    inferential_label = "aplicável" if scenario.get("is_hypothetical") else "não aplicável"
+    inferential_label = "dados reais" if assessment.get("applicable") else "limitada"
     cards = [
         ("Radionuclídeos", str(scenario["radionuclide_count"])),
         ("Cenário", scenario["label"]),
