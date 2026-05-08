@@ -4,6 +4,7 @@ from io import BytesIO
 from typing import Any
 
 from .model import COMPARTMENTS, INFERENTIAL_TEST_MINIMUMS
+from .table_meta import tar_table_meta
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -113,9 +114,64 @@ def _add_docx_table_caption(document: Any, caption: str) -> None:
 
 
 def _add_docx_table_note(document: Any, note: str) -> None:
+    if not note:
+        return
     paragraph = document.add_paragraph(note)
     for run in paragraph.runs:
         run.italic = True
+
+
+def _table_note_parts(table_key: str, *, note: str = "", source_note: str = "", unit_note: str = "") -> list[str]:
+    meta = tar_table_meta(table_key)
+    parts = [
+        unit_note or meta.get("unit_note") or "",
+        note,
+        source_note or meta.get("source_note") or "",
+    ]
+    return [str(part) for part in parts if part]
+
+
+def _add_docx_table_intro(document: Any, table_key: str) -> None:
+    meta = tar_table_meta(table_key)
+    document.add_paragraph(meta["lead_text"])
+    if meta.get("column_notes"):
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Leitura das colunas").bold = True
+        for index, note in enumerate(meta["column_notes"], start=1):
+            document.add_paragraph(f"{index}. {note}")
+    _add_docx_table_caption(document, meta["display_caption"])
+
+
+def _add_docx_table_notes(document: Any, table_key: str, *, note: str = "", source_note: str = "", unit_note: str = "") -> None:
+    for part in _table_note_parts(table_key, note=note, source_note=source_note, unit_note=unit_note):
+        _add_docx_table_note(document, part)
+
+
+def _append_pdf_table_intro(story: list[Any], table_key: str, body_style: Any, caption_style: Any) -> None:
+    from reportlab.platypus import Paragraph
+
+    meta = tar_table_meta(table_key)
+    story.append(Paragraph(_pdf_text(meta["lead_text"]), body_style))
+    if meta.get("column_notes"):
+        story.append(Paragraph("<b>Leitura das colunas</b>", body_style))
+        for index, note in enumerate(meta["column_notes"], start=1):
+            story.append(Paragraph(f"{index}. {_pdf_text(note)}", body_style))
+    story.append(Paragraph(_pdf_text(meta["display_caption"]), caption_style))
+
+
+def _append_pdf_table_notes(
+    story: list[Any],
+    table_key: str,
+    note_style: Any,
+    *,
+    note: str = "",
+    source_note: str = "",
+    unit_note: str = "",
+) -> None:
+    from reportlab.platypus import Paragraph
+
+    for part in _table_note_parts(table_key, note=note, source_note=source_note, unit_note=unit_note):
+        story.append(Paragraph(_pdf_text(part), note_style))
 
 
 def _load_pillow_font(size: int, *, bold: bool = False) -> Any:
@@ -338,7 +394,7 @@ def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any
     document.add_paragraph(empirical.get("narrative_text") or "")
     document.add_paragraph(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in empirical.get("cards") or []))
 
-    _add_docx_table_caption(document, "Tabela - Resumo por grupo de amostras")
+    _add_docx_table_intro(document, "empirical_groups")
     group_table = document.add_table(rows=1, cols=8)
     group_table.style = "Table Grid"
     for index, header in enumerate(["Grupo", "Amostras", "A-TAR detectado", "A-TAR < MDA", "A-TAR ausente", "Média", "Mediana", "P95"]):
@@ -353,12 +409,12 @@ def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any
         cells[5].text = item.get("activity_mean_text", "—")
         cells[6].text = item.get("activity_median_text", "—")
         cells[7].text = item.get("activity_p95_text", "—")
-    _add_docx_table_note(document, EMPIRICAL_ACTIVITY_NOTE)
+    _add_docx_table_notes(document, "empirical_groups", note=empirical.get("mda_policy") or EMPIRICAL_ACTIVITY_NOTE)
 
-    _add_docx_table_caption(document, "Tabela - Estatística por radionuclídeo observado")
-    radionuclide_table = document.add_table(rows=1, cols=9)
+    _add_docx_table_intro(document, "empirical_radionuclides")
+    radionuclide_table = document.add_table(rows=1, cols=11)
     radionuclide_table.style = "Table Grid"
-    for index, header in enumerate(["Grupo", "Radionuclídeo", "Status", "Amostras", "Detectados", "< MDA", "Ausentes", "Taxa det.", "P95"]):
+    for index, header in enumerate(["Grupo", "Radionuclídeo", "Status no modelo", "Amostras", "Detectados", "< MDA", "Ausentes", "Taxa detectada", "Média", "Mediana", "P95"]):
         radionuclide_table.rows[0].cells[index].text = header
     for item in empirical.get("radionuclide_rows") or []:
         cells = radionuclide_table.add_row().cells
@@ -370,12 +426,19 @@ def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any
         cells[5].text = str(item.get("censored_count") or 0)
         cells[6].text = str(item.get("missing_count") or 0)
         cells[7].text = item.get("detected_rate_text", "—")
-        cells[8].text = item.get("p95_text", "—")
+        cells[8].text = item.get("mean_text", "—")
+        cells[9].text = item.get("median_text", "—")
+        cells[10].text = item.get("p95_text", "—")
+    _add_docx_table_notes(
+        document,
+        "empirical_radionuclides",
+        note="Nb-95 permanece como observado não modelado porque não há linha equivalente na fórmula da planilha TAR atual.",
+    )
 
-    _add_docx_table_caption(document, "Tabela - Resultados calculados por fórmula a partir das amostras reais")
-    modeled_table = document.add_table(rows=1, cols=9)
+    _add_docx_table_intro(document, "empirical_modeled")
+    modeled_table = document.add_table(rows=1, cols=11)
     modeled_table.style = "Table Grid"
-    for index, header in enumerate(["Grupo", "Radionuclídeo", "Compart.", "n", "Média", "P95", "Report Level", "P95/RL", "Status"]):
+    for index, header in enumerate(["Grupo", "Radionuclídeo", "Compartimento", "n", "Média", "Mediana", "P95", "Report Level", "P95/RL", "Status", "Freq. > RL"]):
         modeled_table.rows[0].cells[index].text = header
     for item in empirical.get("modeled_compartment_rows") or []:
         cells = modeled_table.add_row().cells
@@ -384,11 +447,17 @@ def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any
         cells[2].text = item.get("compartment", "")
         cells[3].text = str(item.get("n") or "—")
         cells[4].text = item.get("mean_text", "—")
-        cells[5].text = item.get("p95_text", "—")
-        cells[6].text = item.get("report_level_text", "—")
-        cells[7].text = item.get("report_level_p95_ratio_text", "—")
-        cells[8].text = item.get("report_level_status", "—")
-    _add_docx_table_note(document, empirical.get("mda_policy") or "")
+        cells[5].text = item.get("median_text", "—")
+        cells[6].text = item.get("p95_text", "—")
+        cells[7].text = item.get("report_level_text", "—")
+        cells[8].text = item.get("report_level_p95_ratio_text", "—")
+        cells[9].text = item.get("report_level_status", "—")
+        cells[10].text = item.get("report_level_exceedance_rate_text", "—")
+    _add_docx_table_notes(
+        document,
+        "empirical_modeled",
+        note="As frações Si foram calculadas por amostra a partir dos radionuclídeos detectados; < MDA> não participa do denominador.",
+    )
 
 
 def _add_docx_sensitivity_section(document: Any, sensitivity: dict[str, Any]) -> None:
@@ -400,27 +469,27 @@ def _add_docx_sensitivity_section(document: Any, sensitivity: dict[str, Any]) ->
     document.add_paragraph(sensitivity.get("narrative_text") or "")
     document.add_paragraph(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in sensitivity.get("cards") or []))
 
-    document.add_paragraph(SENSITIVITY_VARIABLES_EXPLANATION)
-    _add_docx_table_caption(document, "Tabela - Distribuições sintéticas usadas no Monte Carlo")
-    variable_table = document.add_table(rows=1, cols=4)
+    _add_docx_table_intro(document, "sensitivity_variables")
+    variable_table = document.add_table(rows=1, cols=6)
     variable_table.style = "Table Grid"
-    for index, header in enumerate(["Variável", "Distribuição", "Parâmetros", "Base"]):
+    for index, header in enumerate(["Variável", "Distribuição", "Parâmetros", "Base", "Unidade", "Uso no modelo"]):
         variable_table.rows[0].cells[index].text = header
     for variable in sensitivity.get("variables") or []:
         cells = variable_table.add_row().cells
         cells[0].text = variable.get("label", "")
         cells[1].text = variable.get("distribution", "")
         cells[2].text = variable.get("parameters", "")
-        cells[3].text = f"{variable.get('base_value_text', '—')} {variable.get('unit', '')}".strip()
-    _add_docx_table_note(document, sensitivity.get("source_note") or SENSITIVITY_NOTE)
+        cells[3].text = variable.get("base_value_text", "—")
+        cells[4].text = variable.get("unit", "")
+        cells[5].text = variable.get("description", "")
+    _add_docx_table_notes(document, "sensitivity_variables", note=sensitivity.get("source_note") or SENSITIVITY_NOTE)
 
     for title, image_buffer, _width, _height in _sensitivity_chart_images(sensitivity):
         document.add_paragraph(CHART_EXPLANATIONS.get(title, ""))
         _add_docx_table_caption(document, title)
         document.add_picture(image_buffer, width=Inches(6.6))
 
-    document.add_paragraph(SENSITIVITY_INFLUENCE_EXPLANATION)
-    _add_docx_table_caption(document, "Tabela - Ranking de influência")
+    _add_docx_table_intro(document, "sensitivity_influence")
     influence_table = document.add_table(rows=1, cols=4)
     influence_table.style = "Table Grid"
     for index, header in enumerate(["Variável", "Spearman", "|Correlação|", "Sentido"]):
@@ -431,12 +500,19 @@ def _add_docx_sensitivity_section(document: Any, sensitivity: dict[str, Any]) ->
         cells[1].text = item.get("correlation_text", "—")
         cells[2].text = item.get("absolute_correlation_text", "—")
         cells[3].text = item.get("direction", "—")
+    _add_docx_table_notes(
+        document,
+        "sensitivity_influence",
+        note=(
+            "Correlação positiva indica que valores maiores da variável tendem a aumentar a maior razão contra o Report Level; "
+            "correlação negativa indica que valores maiores tendem a reduzir essa razão."
+        ),
+    )
 
-    document.add_paragraph(SENSITIVITY_RESULTS_EXPLANATION)
-    _add_docx_table_caption(document, "Tabela - Resultados simulados")
-    result_table = document.add_table(rows=1, cols=7)
+    _add_docx_table_intro(document, "sensitivity_results")
+    result_table = document.add_table(rows=1, cols=9)
     result_table.style = "Table Grid"
-    for index, header in enumerate(["Radionuclídeo", "Compartimento", "Média", "Mín.", "Máx.", "P95", "Prob. > RL"]):
+    for index, header in enumerate(["Radionuclídeo", "Compartimento", "Média", "Mínimo", "Máximo", "P95", "Report Level", "P95/RL", "Prob. > RL"]):
         result_table.rows[0].cells[index].text = header
     for item in sensitivity.get("summary_rows") or []:
         cells = result_table.add_row().cells
@@ -446,7 +522,126 @@ def _add_docx_sensitivity_section(document: Any, sensitivity: dict[str, Any]) ->
         cells[3].text = item.get("min_text", "—")
         cells[4].text = item.get("max_text", "—")
         cells[5].text = item.get("p95_text", "—")
-        cells[6].text = item.get("exceedance_probability_text", "—")
+        cells[6].text = item.get("report_level_text", "—")
+        cells[7].text = item.get("p95_report_level_ratio_text", "—")
+        cells[8].text = item.get("exceedance_probability_text", "—")
+    _add_docx_table_notes(
+        document,
+        "sensitivity_results",
+        note=(
+            "A probabilidade empírica é calculada como número de simulações acima do Report Level dividido pelo número total de simulações. "
+            "Quando não há Report Level cadastrado, a probabilidade fica sem referência."
+        ),
+    )
+
+
+def _add_docx_stat_source_table(document: Any, statistical: dict[str, Any], rows_key: str, table_key: str) -> None:
+    _add_docx_table_intro(document, table_key)
+    if rows_key == "norm_rows":
+        table = document.add_table(rows=1, cols=5)
+        table.style = "Table Grid"
+        headers = ["Radionuclídeo", "Compartimento", "Referência", "Valor normativo", "Unidade"]
+        for index, header in enumerate(headers):
+            table.rows[0].cells[index].text = header
+        for item in statistical.get(rows_key) or []:
+            cells = table.add_row().cells
+            cells[0].text = item.get("radionuclide", "")
+            cells[1].text = item.get("compartment", "")
+            cells[2].text = item.get("reference", "")
+            cells[3].text = item.get("value_text", "—")
+            cells[4].text = item.get("unit", "")
+    else:
+        table = document.add_table(rows=1, cols=5)
+        table.style = "Table Grid"
+        headers = ["Radionuclídeo", "Compartimento", "Valor base", "Unidade", "Origem"]
+        for index, header in enumerate(headers):
+            table.rows[0].cells[index].text = header
+        for item in statistical.get(rows_key) or []:
+            cells = table.add_row().cells
+            cells[0].text = item.get("radionuclide", "")
+            cells[1].text = item.get("compartment", "")
+            cells[2].text = item.get("value_text", "—")
+            cells[3].text = item.get("unit", "")
+            cells[4].text = item.get("method", "")
+    _add_docx_table_notes(
+        document,
+        table_key,
+        note="Os valores normativos são fixos; os valores calculados e ERICA são bases para replicações sintéticas exploratórias.",
+    )
+
+
+def _add_docx_statistical_section(document: Any, statistical: dict[str, Any]) -> None:
+    if not statistical:
+        return
+
+    document.add_heading("Estatística calculado vs ERICA vs norma", level=1)
+    document.add_paragraph(statistical.get("narrative_text") or "")
+    _add_docx_table_note(
+        document,
+        "Todas as menções a N nesta seção se referem a replicações sintéticas exploratórias. Esses dados aleatórios não são medições reais e servem apenas para análise estatística exploratória.",
+    )
+
+    _add_docx_stat_source_table(document, statistical, "calculated_rows", "stat_calculated")
+    _add_docx_stat_source_table(document, statistical, "erica_rows", "stat_erica")
+    _add_docx_stat_source_table(document, statistical, "norm_rows", "stat_norms")
+
+    _add_docx_table_intro(document, "stat_descriptive")
+    descriptive = document.add_table(rows=1, cols=11)
+    descriptive.style = "Table Grid"
+    for index, header in enumerate(["Conjunto", "Radionuclídeo", "Compartimento", "n", "Média", "Mediana", "Desvio-padrão", "Q1", "Q3", "P95", "CV"]):
+        descriptive.rows[0].cells[index].text = header
+    for item in statistical.get("descriptive_rows") or []:
+        cells = descriptive.add_row().cells
+        cells[0].text = item.get("dataset", "")
+        cells[1].text = item.get("radionuclide", "")
+        cells[2].text = item.get("compartment", "")
+        cells[3].text = str(item.get("n") or "—")
+        cells[4].text = item.get("mean_text", "—")
+        cells[5].text = item.get("median_text", "—")
+        cells[6].text = item.get("stdev_text", "—")
+        cells[7].text = item.get("q1_text", "—")
+        cells[8].text = item.get("q3_text", "—")
+        cells[9].text = item.get("p95_text", "—")
+        cells[10].text = item.get("cv_text", "—")
+    _add_docx_table_notes(document, "stat_descriptive", note="As replicações sintéticas exploratórias aumentam N para análise estatística, mas não são medições reais.")
+
+    _add_docx_table_intro(document, "stat_inferential")
+    inferential = document.add_table(rows=1, cols=11)
+    inferential.style = "Table Grid"
+    for index, header in enumerate(["Conjunto", "Radionuclídeo", "Compartimento", "Norma", "n", "Shapiro-Wilk", "Teste", "p-value", "P95 razão", "Ultrapassagem", "Conclusão exploratória"]):
+        inferential.rows[0].cells[index].text = header
+    for item in statistical.get("inferential_rows") or []:
+        cells = inferential.add_row().cells
+        cells[0].text = item.get("dataset", "")
+        cells[1].text = item.get("radionuclide", "")
+        cells[2].text = item.get("compartment", "")
+        cells[3].text = item.get("reference", "")
+        cells[4].text = str(item.get("n") or "—")
+        cells[5].text = item.get("shapiro_p_text", "—")
+        cells[6].text = item.get("test_label", "—")
+        cells[7].text = item.get("p_value_text", "—")
+        cells[8].text = item.get("p95_ratio_text", "—")
+        cells[9].text = item.get("exceedance_rate_text", "—")
+        cells[10].text = item.get("conclusion", "")
+    _add_docx_table_notes(document, "stat_inferential", note="O teste usa log(valor / referência). A hipótese alternativa é ficar abaixo da norma; a norma permanece determinística.")
+
+    _add_docx_table_intro(document, "stat_paired")
+    paired = document.add_table(rows=1, cols=9)
+    paired.style = "Table Grid"
+    for index, header in enumerate(["Radionuclídeo", "Compartimento", "n", "Calculado", "ERICA", "Mediana calculado/ERICA", "IC95% da razão média", "Teste", "p-value"]):
+        paired.rows[0].cells[index].text = header
+    for item in statistical.get("paired_comparison_rows") or []:
+        cells = paired.add_row().cells
+        cells[0].text = item.get("radionuclide", "")
+        cells[1].text = item.get("compartment", "")
+        cells[2].text = str(item.get("n") or "—")
+        cells[3].text = item.get("calculated_value_text", "—")
+        cells[4].text = item.get("erica_value_text", "—")
+        cells[5].text = item.get("median_ratio_text", "—")
+        cells[6].text = f"{item.get('ci95_low_text', '—')} - {item.get('ci95_high_text', '—')}"
+        cells[7].text = item.get("test_label", "—")
+        cells[8].text = item.get("p_value_text", "—")
+    _add_docx_table_notes(document, "stat_paired", note="A comparação pareada usa log(calculado / ERICA) e tem finalidade exploratória, não validação regulatória final.")
 
 
 def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
@@ -473,8 +668,23 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         else "O n do cenário hipotético corresponde ao número de medições sintéticas por radionuclídeo. O teste inferencial foi aplicado sobre o logaritmo da razão simulado/Report Level."
     )
 
+    document.add_heading("Referências disponíveis", level=1)
+    _add_docx_table_intro(document, "reference_counts")
+    reference_counts = document.add_table(rows=1, cols=4)
+    reference_counts.style = "Table Grid"
+    for index, header in enumerate(["Compartimento", "Report Level", "LLD", "Radionuclídeos com referência"]):
+        reference_counts.rows[0].cells[index].text = header
+    for compartment in COMPARTMENTS:
+        count = scenario["reference_counts"][compartment["key"]]
+        cells = reference_counts.add_row().cells
+        cells[0].text = count["label"]
+        cells[1].text = str(count["report_level"])
+        cells[2].text = str(count["lld"])
+        cells[3].text = ", ".join(count["report_level_radionuclides"]) or "sem referência"
+    _add_docx_table_notes(document, "reference_counts", note=REPORT_LEVEL_NOTE)
+
     document.add_heading("Concentrações calculadas", level=1)
-    _add_docx_table_caption(document, "Tabela - Concentrações calculadas por radionuclídeo e compartimento")
+    _add_docx_table_intro(document, "concentrations")
     table = document.add_table(rows=1, cols=1 + len(COMPARTMENTS))
     table.style = "Table Grid"
     headers = ["Radionuclídeo", *[f"{comp['label']} ({comp['unit']})" for comp in COMPARTMENTS]]
@@ -485,10 +695,10 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         cells[0].text = item["radionuclide"]
         for index, compartment in enumerate(COMPARTMENTS, start=1):
             cells[index].text = item["compartments"][compartment["key"]]["value_text"]
-    _add_docx_table_note(document, HYPOTHETICAL_N_NOTE if scenario.get("is_hypothetical") else DETERMINISTIC_N_NOTE)
+    _add_docx_table_notes(document, "concentrations", note=HYPOTHETICAL_N_NOTE if scenario.get("is_hypothetical") else DETERMINISTIC_N_NOTE)
 
     document.add_heading("Comparação com Report Level e LLD", level=1)
-    _add_docx_table_caption(document, "Tabela - Comparação das concentrações com Report Level e LLD")
+    _add_docx_table_intro(document, "reference_results")
     reference_table = document.add_table(rows=1, cols=9)
     reference_table.style = "Table Grid"
     reference_headers = [
@@ -517,11 +727,11 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             cells[6].text = data["lld_text"]
             cells[7].text = data["lld_ratio_text"]
             cells[8].text = data["lld_status"]
-    _add_docx_table_note(document, REPORT_LEVEL_NOTE)
+    _add_docx_table_notes(document, "reference_results", note=REPORT_LEVEL_NOTE)
 
     if scenario.get("is_hypothetical"):
         document.add_heading("Medições sintéticas da água do TAR", level=1)
-        _add_docx_table_caption(document, "Tabela - Resumo das medições sintéticas da água do TAR")
+        _add_docx_table_intro(document, "hypothetical_measurements")
         measurement_table = document.add_table(rows=1, cols=6)
         measurement_table.style = "Table Grid"
         for index, header in enumerate(["Radionuclídeo", "n", "Base TAR", "Média", "Mediana", "P95"]):
@@ -535,14 +745,14 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             cells[3].text = measurement["mean_text"]
             cells[4].text = measurement["median_text"]
             cells[5].text = measurement["p95_text"]
-        _add_docx_table_note(document, HYPOTHETICAL_N_NOTE)
+        _add_docx_table_notes(document, "hypothetical_measurements", note=HYPOTHETICAL_N_NOTE)
 
         document.add_heading("Teste estatístico do cenário hipotético", level=1)
         document.add_paragraph(scenario.get("statistical_text") or "")
-        _add_docx_table_caption(document, "Tabela - Teste estatístico das simulações contra o Report Level")
-        test_table = document.add_table(rows=1, cols=8)
+        _add_docx_table_intro(document, "hypothetical_tests")
+        test_table = document.add_table(rows=1, cols=9)
         test_table.style = "Table Grid"
-        for index, header in enumerate(["Radionuclídeo", "Compartimento", "n", "Shapiro-Wilk", "Teste", "p-value", "P95 simulado / Report Level", "Conclusão"]):
+        for index, header in enumerate(["Radionuclídeo", "Compartimento", "n sim.", "Shapiro-Wilk", "Teste usado", "p-value", "P95 simulado / Report Level", "Acima do limite", "Conclusão"]):
             test_table.rows[0].cells[index].text = header
         for result in scenario.get("statistical_tests", []):
             cells = test_table.add_row().cells
@@ -553,16 +763,19 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             cells[4].text = result.get("test_label") or "—"
             cells[5].text = result.get("p_value_text") or "—"
             cells[6].text = result.get("p95_ratio_text") or "—"
-            cells[7].text = result.get("conclusion") or ""
-        _add_docx_table_note(document, HYPOTHETICAL_TEST_NOTE)
+            cells[7].text = str(result.get("exceedance_count") or 0)
+            cells[8].text = result.get("conclusion") or ""
+        _add_docx_table_notes(document, "hypothetical_tests", note=HYPOTHETICAL_TEST_NOTE)
 
     _add_docx_empirical_activity_section(document, scenario.get("empirical_activity_statistics") or {})
+
+    _add_docx_statistical_section(document, scenario.get("statistical_comparison") or {})
 
     _add_docx_sensitivity_section(document, scenario.get("sensitivity") or {})
 
     document.add_heading("Suficiência estatística", level=1)
     document.add_paragraph(summary["inferential_assessment"]["reason"])
-    _add_docx_table_caption(document, "Tabela - Critérios mínimos para suficiência estatística")
+    _add_docx_table_intro(document, "minimums")
     minimums = document.add_table(rows=1, cols=3)
     minimums.style = "Table Grid"
     for index, header in enumerate(["Teste", "Mínimo técnico", "Recomendado para relatório"]):
@@ -572,7 +785,7 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         cells[0].text = item["test"]
         cells[1].text = item["technical_minimum"]
         cells[2].text = item["recommended"]
-    _add_docx_table_note(document, DETERMINISTIC_N_NOTE)
+    _add_docx_table_notes(document, "minimums", note=DETERMINISTIC_N_NOTE)
 
     output = BytesIO()
     document.save(output)
@@ -612,28 +825,149 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         Spacer(1, 8),
     ]
 
-    if summary["scenario"].get("is_hypothetical"):
+    def apply_table_style(table: Any, *, font_size: float = 7) -> Any:
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), font_size),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        return table
+
+    scenario = summary["scenario"]
+
+    story.append(Paragraph("Referências disponíveis", subheading_style))
+    _append_pdf_table_intro(story, "reference_counts", body_style, caption_style)
+    reference_count_rows = [["Compartimento", "Report Level", "LLD", "Radionuclídeos com referência"]]
+    for compartment in COMPARTMENTS:
+        count = scenario["reference_counts"][compartment["key"]]
+        reference_count_rows.append(
+            [
+                count["label"],
+                str(count["report_level"]),
+                str(count["lld"]),
+                ", ".join(count["report_level_radionuclides"]) or "sem referência",
+            ]
+        )
+    reference_count_table = apply_table_style(
+        Table(reference_count_rows, colWidths=[3.0 * cm, 2.4 * cm, 2.0 * cm, 8.6 * cm], repeatRows=1),
+        font_size=7,
+    )
+    story.append(reference_count_table)
+    _append_pdf_table_notes(story, "reference_counts", note_style, note=REPORT_LEVEL_NOTE)
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Concentrações calculadas", subheading_style))
+    _append_pdf_table_intro(story, "concentrations", body_style, caption_style)
+    concentration_rows = [["Radionuclídeo", *[f"{comp['label']} ({comp['unit']})" for comp in COMPARTMENTS]]]
+    for item in scenario["rows"]:
+        concentration_rows.append(
+            [
+                item["radionuclide"],
+                *[item["compartments"][compartment["key"]]["value_text"] for compartment in COMPARTMENTS],
+            ]
+        )
+    concentration_table = apply_table_style(
+        Table(concentration_rows, colWidths=[2.2 * cm, 3.3 * cm, 3.3 * cm, 3.4 * cm, 3.3 * cm], repeatRows=1),
+        font_size=6.3,
+    )
+    story.append(concentration_table)
+    _append_pdf_table_notes(
+        story,
+        "concentrations",
+        note_style,
+        note=HYPOTHETICAL_N_NOTE if scenario.get("is_hypothetical") else DETERMINISTIC_N_NOTE,
+    )
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Comparação com Report Level e LLD", subheading_style))
+    _append_pdf_table_intro(story, "reference_results", body_style, caption_style)
+    reference_rows = [["Radionuclídeo", "Compart.", "Concentração", "Report Level", "Razão RL", "Status RL", "LLD", "Razão LLD", "Status LLD"]]
+    for item in scenario["rows"]:
+        for compartment in COMPARTMENTS:
+            data = item["compartments"][compartment["key"]]
+            reference_rows.append(
+                [
+                    item["radionuclide"],
+                    compartment["label"],
+                    data["value_text"],
+                    data["report_level_text"],
+                    data["report_level_ratio_text"],
+                    data["report_level_status"],
+                    data["lld_text"],
+                    data["lld_ratio_text"],
+                    data["lld_status"],
+                ]
+            )
+    reference_table = apply_table_style(
+        Table(
+            reference_rows,
+            colWidths=[1.6 * cm, 1.7 * cm, 2.0 * cm, 2.0 * cm, 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.5 * cm, 1.5 * cm],
+            repeatRows=1,
+        ),
+        font_size=4.8,
+    )
+    story.append(reference_table)
+    _append_pdf_table_notes(story, "reference_results", note_style, note=REPORT_LEVEL_NOTE)
+    story.append(Spacer(1, 8))
+
+    if scenario.get("is_hypothetical"):
+        story.append(Paragraph("Medições sintéticas da água do TAR", subheading_style))
+        _append_pdf_table_intro(story, "hypothetical_measurements", body_style, caption_style)
+        measurement_rows = [["Radionuclídeo", "n", "Base TAR", "Média", "Mediana", "P95"]]
+        for item in scenario["rows"]:
+            measurement = item["measurement_summary"]
+            measurement_rows.append(
+                [
+                    item["radionuclide"],
+                    str(item["measurement_count"]),
+                    item["source_concentration_bq_m3_text"],
+                    measurement["mean_text"],
+                    measurement["median_text"],
+                    measurement["p95_text"],
+                ]
+            )
+        measurement_table = apply_table_style(
+            Table(measurement_rows, colWidths=[2.3 * cm, 1.0 * cm, 3.1 * cm, 3.1 * cm, 3.1 * cm, 3.1 * cm], repeatRows=1),
+            font_size=6.2,
+        )
+        story.append(measurement_table)
+        _append_pdf_table_notes(story, "hypothetical_measurements", note_style, note=HYPOTHETICAL_N_NOTE)
+        story.append(Spacer(1, 8))
+
         story.extend(
             [
                 Paragraph("Teste estatístico do cenário hipotético", subheading_style),
-                Paragraph(summary["scenario"].get("statistical_text") or "", body_style),
+                Paragraph(scenario.get("statistical_text") or "", body_style),
                 Spacer(1, 8),
-                Paragraph("Tabela - Teste estatístico das simulações contra o Report Level", caption_style),
             ]
         )
-        test_rows = [["Radionuclídeo", "Compartimento", "n", "Teste", "p-value", "P95 simulado / Report Level"]]
-        for result in summary["scenario"].get("statistical_tests", []):
+        _append_pdf_table_intro(story, "hypothetical_tests", body_style, caption_style)
+        test_rows = [["Radionuclídeo", "Compart.", "n", "Shapiro", "Teste", "p-value", "P95/RL", "Acima", "Conclusão"]]
+        for result in scenario.get("statistical_tests", []):
             test_rows.append(
                 [
                     result.get("radionuclide", ""),
                     result.get("compartment", ""),
                     str(result.get("n") or "—"),
+                    result.get("shapiro_p_text") or "—",
                     result.get("test_label") or "—",
                     result.get("p_value_text") or "—",
                     result.get("p95_ratio_text") or "—",
+                    str(result.get("exceedance_count") or 0),
+                    result.get("conclusion") or "",
                 ]
             )
-        test_table = Table(test_rows, colWidths=[2.2 * cm, 2.4 * cm, 1.2 * cm, 4.3 * cm, 2.2 * cm, 2.2 * cm], repeatRows=1)
+        test_table = Table(
+            test_rows,
+            colWidths=[1.5 * cm, 1.7 * cm, 0.8 * cm, 1.2 * cm, 2.0 * cm, 1.1 * cm, 1.2 * cm, 1.0 * cm, 4.0 * cm],
+            repeatRows=1,
+        )
         test_table.setStyle(
             TableStyle(
                 [
@@ -645,21 +979,22 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([test_table, Paragraph(HYPOTHETICAL_TEST_NOTE, note_style), Spacer(1, 8)])
+        story.append(test_table)
+        _append_pdf_table_notes(story, "hypothetical_tests", note_style, note=HYPOTHETICAL_TEST_NOTE)
+        story.append(Spacer(1, 8))
 
-    empirical = summary["scenario"].get("empirical_activity_statistics") or {}
+    empirical = scenario.get("empirical_activity_statistics") or {}
     if empirical:
         story.extend(
             [
                 Paragraph("Dados reais de atividade total TAR", subheading_style),
                 Paragraph(_pdf_text(empirical.get("narrative_text") or ""), body_style),
                 Paragraph(_pdf_text(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in empirical.get("cards") or [])), body_style),
-                Paragraph(EMPIRICAL_ACTIVITY_NOTE, note_style),
                 Spacer(1, 8),
-                Paragraph("Tabela - Resumo por grupo de amostras", caption_style),
             ]
         )
-        group_rows = [["Grupo", "Amostras", "A-TAR det.", "A-TAR < MDA", "Ausente", "Média", "P95"]]
+        _append_pdf_table_intro(story, "empirical_groups", body_style, caption_style)
+        group_rows = [["Grupo", "Amostras", "A-TAR det.", "A-TAR < MDA", "Ausente", "Média", "Mediana", "P95"]]
         for item in empirical.get("groups") or []:
             group_rows.append(
                 [
@@ -669,10 +1004,11 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                     str(item.get("activity_censored_count") or 0),
                     str(item.get("activity_missing_count") or 0),
                     item.get("activity_mean_text", "—"),
+                    item.get("activity_median_text", "—"),
                     item.get("activity_p95_text", "—"),
                 ]
             )
-        group_table = Table(group_rows, colWidths=[3.2 * cm, 1.7 * cm, 1.8 * cm, 2.0 * cm, 1.7 * cm, 2.6 * cm, 2.6 * cm], repeatRows=1)
+        group_table = Table(group_rows, colWidths=[2.7 * cm, 1.4 * cm, 1.5 * cm, 1.7 * cm, 1.4 * cm, 2.2 * cm, 2.2 * cm, 2.2 * cm], repeatRows=1)
         group_table.setStyle(
             TableStyle(
                 [
@@ -684,23 +1020,33 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([group_table, Spacer(1, 8), Paragraph("Tabela - Estatística por radionuclídeo observado", caption_style)])
+        story.append(group_table)
+        _append_pdf_table_notes(story, "empirical_groups", note_style, note=empirical.get("mda_policy") or EMPIRICAL_ACTIVITY_NOTE)
+        story.append(Spacer(1, 8))
+        _append_pdf_table_intro(story, "empirical_radionuclides", body_style, caption_style)
 
-        radionuclide_rows = [["Grupo", "Radionuclídeo", "Status", "Detect.", "< MDA", "Aus.", "Taxa", "P95"]]
+        radionuclide_rows = [["Grupo", "Radionuclídeo", "Status", "Amostras", "Detect.", "< MDA", "Aus.", "Taxa", "Média", "Mediana", "P95"]]
         for item in empirical.get("radionuclide_rows") or []:
             radionuclide_rows.append(
                 [
                     item.get("group", ""),
                     item.get("radionuclide", ""),
                     item.get("model_status", ""),
+                    str(item.get("sample_count") or 0),
                     str(item.get("detected_count") or 0),
                     str(item.get("censored_count") or 0),
                     str(item.get("missing_count") or 0),
                     item.get("detected_rate_text", "—"),
+                    item.get("mean_text", "—"),
+                    item.get("median_text", "—"),
                     item.get("p95_text", "—"),
                 ]
             )
-        radionuclide_table = Table(radionuclide_rows, colWidths=[2.6 * cm, 1.7 * cm, 2.8 * cm, 1.3 * cm, 1.3 * cm, 1.2 * cm, 1.5 * cm, 2.6 * cm], repeatRows=1)
+        radionuclide_table = Table(
+            radionuclide_rows,
+            colWidths=[2.0 * cm, 1.2 * cm, 1.9 * cm, 1.0 * cm, 1.0 * cm, 1.0 * cm, 0.9 * cm, 1.1 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm],
+            repeatRows=1,
+        )
         radionuclide_table.setStyle(
             TableStyle(
                 [
@@ -712,9 +1058,17 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([radionuclide_table, Spacer(1, 8), Paragraph("Tabela - Resultados calculados por fórmula a partir das amostras reais", caption_style)])
+        story.append(radionuclide_table)
+        _append_pdf_table_notes(
+            story,
+            "empirical_radionuclides",
+            note_style,
+            note="Nb-95 permanece como observado não modelado porque não há linha equivalente na fórmula da planilha TAR atual.",
+        )
+        story.append(Spacer(1, 8))
+        _append_pdf_table_intro(story, "empirical_modeled", body_style, caption_style)
 
-        modeled_rows = [["Grupo", "Radionuclídeo", "Compart.", "n", "P95", "RL", "P95/RL", "Status"]]
+        modeled_rows = [["Grupo", "Radionuclídeo", "Compart.", "n", "Média", "Mediana", "P95", "RL", "P95/RL", "Status", "Freq. > RL"]]
         for item in empirical.get("modeled_compartment_rows") or []:
             modeled_rows.append(
                 [
@@ -722,13 +1076,20 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                     item.get("radionuclide", ""),
                     item.get("compartment", ""),
                     str(item.get("n") or "—"),
+                    item.get("mean_text", "—"),
+                    item.get("median_text", "—"),
                     item.get("p95_text", "—"),
                     item.get("report_level_text", "—"),
                     item.get("report_level_p95_ratio_text", "—"),
                     item.get("report_level_status", "—"),
+                    item.get("report_level_exceedance_rate_text", "—"),
                 ]
             )
-        modeled_table = Table(modeled_rows, colWidths=[2.4 * cm, 1.7 * cm, 2.2 * cm, 1.0 * cm, 2.2 * cm, 2.2 * cm, 1.7 * cm, 1.5 * cm], repeatRows=1)
+        modeled_table = Table(
+            modeled_rows,
+            colWidths=[1.7 * cm, 1.1 * cm, 1.4 * cm, 0.7 * cm, 1.5 * cm, 1.5 * cm, 1.5 * cm, 1.5 * cm, 1.1 * cm, 1.1 * cm, 1.5 * cm],
+            repeatRows=1,
+        )
         modeled_table.setStyle(
             TableStyle(
                 [
@@ -740,9 +1101,153 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([modeled_table, Spacer(1, 8)])
+        story.append(modeled_table)
+        _append_pdf_table_notes(
+            story,
+            "empirical_modeled",
+            note_style,
+            note="As frações Si foram calculadas por amostra a partir dos radionuclídeos detectados; < MDA> não participa do denominador.",
+        )
+        story.append(Spacer(1, 8))
 
-    sensitivity = summary["scenario"].get("sensitivity") or {}
+    statistical = scenario.get("statistical_comparison") or {}
+    if statistical:
+        story.extend(
+            [
+                Paragraph("Estatística calculado vs ERICA vs norma", subheading_style),
+                Paragraph(_pdf_text(statistical.get("narrative_text") or ""), body_style),
+                Paragraph(
+                    "Todas as menções a N nesta seção se referem a replicações sintéticas exploratórias. Esses dados aleatórios não são medições reais e servem apenas para análise estatística exploratória.",
+                    note_style,
+                ),
+                Spacer(1, 8),
+            ]
+        )
+
+        for rows_key, table_key in [("calculated_rows", "stat_calculated"), ("erica_rows", "stat_erica"), ("norm_rows", "stat_norms")]:
+            _append_pdf_table_intro(story, table_key, body_style, caption_style)
+            if rows_key == "norm_rows":
+                stat_source_rows = [["Radionuclídeo", "Compart.", "Referência", "Valor normativo", "Unidade"]]
+                for item in statistical.get(rows_key) or []:
+                    stat_source_rows.append(
+                        [
+                            item.get("radionuclide", ""),
+                            item.get("compartment", ""),
+                            item.get("reference", ""),
+                            item.get("value_text", "—"),
+                            item.get("unit", ""),
+                        ]
+                    )
+            else:
+                stat_source_rows = [["Radionuclídeo", "Compart.", "Valor base", "Unidade", "Origem"]]
+                for item in statistical.get(rows_key) or []:
+                    stat_source_rows.append(
+                        [
+                            item.get("radionuclide", ""),
+                            item.get("compartment", ""),
+                            item.get("value_text", "—"),
+                            item.get("unit", ""),
+                            item.get("method", ""),
+                        ]
+                    )
+            stat_source_table = apply_table_style(
+                Table(stat_source_rows, colWidths=[2.0 * cm, 2.1 * cm, 2.6 * cm, 2.1 * cm, 7.0 * cm], repeatRows=1),
+                font_size=5.5,
+            )
+            story.append(stat_source_table)
+            _append_pdf_table_notes(
+                story,
+                table_key,
+                note_style,
+                note="Os valores normativos são fixos; os valores calculados e ERICA são bases para replicações sintéticas exploratórias.",
+            )
+            story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "stat_descriptive", body_style, caption_style)
+        descriptive_rows = [["Conjunto", "Radionuclídeo", "Compart.", "n", "Média", "Mediana", "DP", "Q1", "Q3", "P95", "CV"]]
+        for item in statistical.get("descriptive_rows") or []:
+            descriptive_rows.append(
+                [
+                    item.get("dataset", ""),
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    str(item.get("n") or "—"),
+                    item.get("mean_text", "—"),
+                    item.get("median_text", "—"),
+                    item.get("stdev_text", "—"),
+                    item.get("q1_text", "—"),
+                    item.get("q3_text", "—"),
+                    item.get("p95_text", "—"),
+                    item.get("cv_text", "—"),
+                ]
+            )
+        descriptive_table = apply_table_style(
+            Table(
+                descriptive_rows,
+                colWidths=[1.5 * cm, 1.4 * cm, 1.5 * cm, 0.8 * cm, 1.4 * cm, 1.4 * cm, 1.3 * cm, 1.1 * cm, 1.1 * cm, 1.3 * cm, 1.1 * cm],
+                repeatRows=1,
+            ),
+            font_size=4.6,
+        )
+        story.append(descriptive_table)
+        _append_pdf_table_notes(story, "stat_descriptive", note_style, note="As replicações sintéticas exploratórias aumentam N para análise estatística, mas não são medições reais.")
+        story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "stat_inferential", body_style, caption_style)
+        inferential_rows = [["Conjunto", "Radionuclídeo", "Compart.", "Norma", "n", "Shapiro", "Teste", "p-value", "P95 razão", "Ultrap.", "Conclusão"]]
+        for item in statistical.get("inferential_rows") or []:
+            inferential_rows.append(
+                [
+                    item.get("dataset", ""),
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    item.get("reference", ""),
+                    str(item.get("n") or "—"),
+                    item.get("shapiro_p_text", "—"),
+                    item.get("test_label", "—"),
+                    item.get("p_value_text", "—"),
+                    item.get("p95_ratio_text", "—"),
+                    item.get("exceedance_rate_text", "—"),
+                    item.get("conclusion", ""),
+                ]
+            )
+        inferential_table = apply_table_style(
+            Table(
+                inferential_rows,
+                colWidths=[1.4 * cm, 1.3 * cm, 1.4 * cm, 1.1 * cm, 0.7 * cm, 1.2 * cm, 1.7 * cm, 1.1 * cm, 1.2 * cm, 1.1 * cm, 2.6 * cm],
+                repeatRows=1,
+            ),
+            font_size=3.9,
+        )
+        story.append(inferential_table)
+        _append_pdf_table_notes(story, "stat_inferential", note_style, note="O teste usa log(valor / referência). A hipótese alternativa é ficar abaixo da norma; a norma permanece determinística.")
+        story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "stat_paired", body_style, caption_style)
+        paired_rows = [["Radionuclídeo", "Compart.", "n", "Calculado", "ERICA", "Mediana calc./ERICA", "IC95% razão", "Teste", "p-value"]]
+        for item in statistical.get("paired_comparison_rows") or []:
+            paired_rows.append(
+                [
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    str(item.get("n") or "—"),
+                    item.get("calculated_value_text", "—"),
+                    item.get("erica_value_text", "—"),
+                    item.get("median_ratio_text", "—"),
+                    f"{item.get('ci95_low_text', '—')} - {item.get('ci95_high_text', '—')}",
+                    item.get("test_label", "—"),
+                    item.get("p_value_text", "—"),
+                ]
+            )
+        paired_table = apply_table_style(
+            Table(paired_rows, colWidths=[1.5 * cm, 1.5 * cm, 0.7 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 2.3 * cm, 2.0 * cm, 1.2 * cm], repeatRows=1),
+            font_size=4.5,
+        )
+        story.append(paired_table)
+        _append_pdf_table_notes(story, "stat_paired", note_style, note="A comparação pareada usa log(calculado / ERICA) e tem finalidade exploratória, não validação regulatória final.")
+        story.append(Spacer(1, 8))
+
+    sensitivity = scenario.get("sensitivity") or {}
     if sensitivity:
         story.extend(
             [
@@ -750,21 +1255,22 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 Paragraph(sensitivity.get("narrative_text") or "", body_style),
                 Paragraph(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in sensitivity.get("cards") or []), body_style),
                 Spacer(1, 8),
-                Paragraph(SENSITIVITY_VARIABLES_EXPLANATION, body_style),
-                Paragraph("Tabela - Distribuições sintéticas usadas no Monte Carlo", caption_style),
             ]
         )
-        variable_rows = [["Variável", "Distribuição", "Parâmetros", "Base"]]
+        _append_pdf_table_intro(story, "sensitivity_variables", body_style, caption_style)
+        variable_rows = [["Variável", "Distribuição", "Parâmetros", "Base", "Unidade", "Uso no modelo"]]
         for variable in sensitivity.get("variables") or []:
             variable_rows.append(
                 [
                     variable.get("label", ""),
                     variable.get("distribution", ""),
                     variable.get("parameters", ""),
-                    f"{variable.get('base_value_text', '—')} {variable.get('unit', '')}".strip(),
+                    variable.get("base_value_text", "—"),
+                    variable.get("unit", ""),
+                    variable.get("description", ""),
                 ]
             )
-        variable_table = Table(variable_rows, colWidths=[4.8 * cm, 2.8 * cm, 4.4 * cm, 4.0 * cm], repeatRows=1)
+        variable_table = Table(variable_rows, colWidths=[3.1 * cm, 2.1 * cm, 3.2 * cm, 2.1 * cm, 1.7 * cm, 4.1 * cm], repeatRows=1)
         variable_table.setStyle(
             TableStyle(
                 [
@@ -776,7 +1282,9 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([variable_table, Paragraph(sensitivity.get("source_note") or SENSITIVITY_NOTE, note_style), Spacer(1, 8)])
+        story.append(variable_table)
+        _append_pdf_table_notes(story, "sensitivity_variables", note_style, note=sensitivity.get("source_note") or SENSITIVITY_NOTE)
+        story.append(Spacer(1, 8))
 
         for title, image_buffer, width, height in _sensitivity_chart_images(sensitivity):
             image_width = 16.4 * cm
@@ -807,9 +1315,20 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([Paragraph(SENSITIVITY_INFLUENCE_EXPLANATION, body_style), Paragraph("Tabela - Ranking de influência", caption_style), influence_table, Spacer(1, 8)])
+        _append_pdf_table_intro(story, "sensitivity_influence", body_style, caption_style)
+        story.append(influence_table)
+        _append_pdf_table_notes(
+            story,
+            "sensitivity_influence",
+            note_style,
+            note=(
+                "Correlação positiva indica que valores maiores da variável tendem a aumentar a maior razão contra o Report Level; "
+                "correlação negativa indica que valores maiores tendem a reduzir essa razão."
+            ),
+        )
+        story.append(Spacer(1, 8))
 
-        result_rows = [["Radionuclídeo", "Compart.", "Média", "Mín.", "Máx.", "P95", "Prob. > RL"]]
+        result_rows = [["Radionuclídeo", "Compart.", "Média", "Mín.", "Máx.", "P95", "RL", "P95/RL", "Prob. > RL"]]
         for item in sensitivity.get("summary_rows") or []:
             result_rows.append(
                 [
@@ -819,10 +1338,16 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                     item.get("min_text", "—"),
                     item.get("max_text", "—"),
                     item.get("p95_text", "—"),
+                    item.get("report_level_text", "—"),
+                    item.get("p95_report_level_ratio_text", "—"),
                     item.get("exceedance_probability_text", "—"),
                 ]
             )
-        result_table = Table(result_rows, colWidths=[2.2 * cm, 2.4 * cm, 2.3 * cm, 2.3 * cm, 2.3 * cm, 2.3 * cm, 2.2 * cm], repeatRows=1)
+        result_table = Table(
+            result_rows,
+            colWidths=[1.4 * cm, 1.6 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 1.2 * cm, 1.3 * cm],
+            repeatRows=1,
+        )
         result_table.setStyle(
             TableStyle(
                 [
@@ -834,16 +1359,27 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 ]
             )
         )
-        story.extend([Paragraph(SENSITIVITY_RESULTS_EXPLANATION, body_style), Paragraph("Tabela - Resultados simulados", caption_style), result_table, Spacer(1, 8)])
+        _append_pdf_table_intro(story, "sensitivity_results", body_style, caption_style)
+        story.append(result_table)
+        _append_pdf_table_notes(
+            story,
+            "sensitivity_results",
+            note_style,
+            note=(
+                "A probabilidade empírica é calculada como número de simulações acima do Report Level dividido pelo número total de simulações. "
+                "Quando não há Report Level cadastrado, a probabilidade fica sem referência."
+            ),
+        )
+        story.append(Spacer(1, 8))
 
     story.extend(
         [
             Paragraph("Suficiência estatística", subheading_style),
             Paragraph(summary["inferential_assessment"]["reason"], body_style),
             Spacer(1, 8),
-            Paragraph("Tabela - Critérios mínimos para suficiência estatística", caption_style),
         ]
     )
+    _append_pdf_table_intro(story, "minimums", body_style, caption_style)
 
     minimum_rows = [["Teste", "Mínimo técnico", "Recomendado para relatório"]]
     for item in INFERENTIAL_TEST_MINIMUMS:
@@ -861,7 +1397,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             ]
         )
     )
-    story.extend([table, Paragraph(DETERMINISTIC_N_NOTE, note_style)])
+    story.append(table)
+    _append_pdf_table_notes(story, "minimums", note_style, note=DETERMINISTIC_N_NOTE)
     document.build(story)
     filename = f"relatorio_tar_{summary['selected_scenario']}.pdf"
     return output.getvalue(), filename, PDF_MIME

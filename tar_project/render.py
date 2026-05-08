@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .model import COMPARTMENTS, INFERENTIAL_TEST_MINIMUMS, SCENARIOS
+from .table_meta import tar_table_meta
 
 
 def _text(value: Any) -> str:
@@ -71,10 +72,38 @@ def _explain_text(text: str) -> str:
     return f'<p class="explain-text">{escape(text)}</p>' if text else ""
 
 
-def _tar_table(class_name: str, caption: str, header_html: str, body_html: str, note: str = "", intro: str = "") -> str:
-    note_html = f'<p class="table-note">{escape(note)}</p>' if note else ""
+def _column_notes_html(notes: list[str]) -> str:
+    if not notes:
+        return ""
+    items = "".join(f"<li>{escape(note)}</li>" for note in notes)
+    return f'<div class="column-notes-block"><strong>Leitura das colunas</strong><ol class="column-notes">{items}</ol></div>'
+
+
+def _tar_table(
+    class_name: str,
+    caption: str,
+    header_html: str,
+    body_html: str,
+    note: str = "",
+    intro: str = "",
+    *,
+    table_key: str = "",
+    source_note: str = "",
+    unit_note: str = "",
+) -> str:
+    column_notes: list[str] = []
+    if table_key:
+        meta = tar_table_meta(table_key)
+        caption = meta["display_caption"]
+        intro = meta["lead_text"]
+        column_notes = meta["column_notes"]
+        unit_note = unit_note or meta.get("unit_note") or ""
+        source_note = source_note or meta.get("source_note") or ""
+    note_parts = [part for part in [unit_note, note, source_note] if part]
+    note_html = "".join(f'<p class="table-note">{escape(part)}</p>' for part in note_parts)
     return (
         f"{_explain_text(intro)}"
+        f"{_column_notes_html(column_notes)}"
         f'<table class="tar-table {class_name}">'
         f"<caption>{escape(caption)}</caption>"
         f"<thead>{header_html}</thead>"
@@ -103,6 +132,7 @@ def _reference_counts_table(summary: dict[str, Any]) -> str:
         "".join(rows),
         "Report Level é o critério de notificação usado na comparação; LLD é referência de detecção e não limite de ação.",
         "Esta tabela identifica onde há referência numérica cadastrada para comparar os resultados do TAR. Ela ajuda a separar compartimentos avaliáveis daqueles classificados como sem referência.",
+        table_key="reference_counts",
     )
 
 
@@ -128,6 +158,7 @@ def _concentration_table(summary: dict[str, Any]) -> str:
         "".join(rows),
         note,
         "Esta tabela resume os valores calculados por radionuclídeo em cada compartimento ambiental. No cenário hipotético, o valor mostrado é o P95 das simulações; nos cenários reais, é o resultado determinístico da planilha.",
+        table_key="concentrations",
     )
 
 
@@ -158,6 +189,7 @@ def _reference_result_table(summary: dict[str, Any]) -> str:
         "".join(rows),
         "Report Level indica o nível de notificação cadastrado; LLD indica referência de detecção. Status 'sem referência' significa ausência de valor cadastrado para o compartimento.",
         "Esta tabela compara cada concentração com o Report Level e o LLD disponíveis. A razão mostra quantas vezes o valor calculado representa em relação à referência; valores acima de 1 indicam superação da referência correspondente.",
+        table_key="reference_results",
     )
 
 
@@ -178,6 +210,7 @@ def _minimums_table() -> str:
         "".join(rows),
         "Nos cenários reais atuais, o n = 8 representa radionuclídeos calculados e não medições ambientais independentes.",
         "Esta tabela mostra os mínimos práticos para aplicar testes estatísticos com sentido técnico. Ela justifica por que a planilha consolidada atual permanece descritiva quando não há medições independentes.",
+        table_key="minimums",
     )
 
 
@@ -204,6 +237,7 @@ def _hypothetical_measurements_table(summary: dict[str, Any]) -> str:
         "".join(rows),
         "n é o número de medições sintéticas por radionuclídeo; P95 é o percentil 95 dessas medições.",
         "Esta tabela descreve as medições sintéticas geradas para a água do TAR antes de elas alimentarem as simulações ambientais. Ela permite verificar a escala da entrada simulada por radionuclídeo.",
+        table_key="hypothetical_measurements",
     )
 
 
@@ -232,6 +266,7 @@ def _hypothetical_tests_table(summary: dict[str, Any]) -> str:
         "".join(rows),
         "O teste usa o logaritmo da razão entre valor simulado e Report Level; a hipótese alternativa avalia se os resultados simulados permanecem abaixo do Report Level.",
         "Esta tabela mostra, para cada radionuclídeo e compartimento com Report Level, qual teste foi selecionado e se as simulações sustentam margem estatística abaixo da referência.",
+        table_key="hypothetical_tests",
     )
 
 
@@ -316,6 +351,7 @@ def _sensitivity_variables_table(sensitivity: dict[str, Any]) -> str:
         "".join(rows),
         sensitivity.get("source_note") or "",
         "Esta tabela documenta as escolhas usadas no sorteio: qual variável é incerta, qual distribuição foi aplicada, quais parâmetros foram usados e qual valor base do cenário serve como referência.",
+        table_key="sensitivity_variables",
     )
 
 
@@ -337,6 +373,7 @@ def _sensitivity_influence_table(sensitivity: dict[str, Any]) -> str:
         "".join(rows),
         "Correlação positiva indica que valores maiores da variável tendem a aumentar a maior razão contra o Report Level; correlação negativa indica que valores maiores tendem a reduzir essa razão. O valor absoluto mostra a força da influência.",
         "Esta tabela coloca números no que o gráfico tornado mostra visualmente. A correlação de Spearman varia de -1 a +1 e mede se, quando uma variável aumenta nas simulações, a maior razão valor simulado / Report Level também tende a aumentar ou diminuir. A ordenação usa |correlação|, por isso uma variável com -0,80 aparece como muito influente mesmo tendo efeito redutor.",
+        table_key="sensitivity_influence",
     )
 
 
@@ -363,6 +400,7 @@ def _sensitivity_results_table(sensitivity: dict[str, Any]) -> str:
         "".join(rows),
         "A probabilidade empírica é calculada como número de simulações acima do Report Level dividido pelo número total de simulações. Quando não há Report Level cadastrado para o radionuclídeo e o compartimento, a probabilidade fica sem referência.",
         "Esta tabela consolida os resultados de todas as rodadas por radionuclídeo e compartimento. O P95 é o percentil 95: após ordenar as simulações do menor para o maior, ele é o valor abaixo do qual ficam 95% dos cenários. A probabilidade empírica de ultrapassar o Report Level é a fração das simulações que ficaram acima da referência, por exemplo 230 ultrapassagens em 10.000 simulações equivalem a 2,3%.",
+        table_key="sensitivity_results",
     )
 
 
@@ -623,6 +661,11 @@ def _stat_source_rows_table(statistical: dict[str, Any], rows_key: str, caption:
         header = "<tr><th>Radionuclídeo</th><th>Compartimento</th><th>Referência</th><th>Valor normativo</th><th>Unidade</th></tr>"
     else:
         header = "<tr><th>Radionuclídeo</th><th>Compartimento</th><th>Valor base</th><th>Unidade</th><th>Origem</th></tr>"
+    table_keys = {
+        "calculated_rows": "stat_calculated",
+        "erica_rows": "stat_erica",
+        "norm_rows": "stat_norms",
+    }
     return _tar_table(
         "tar-table--dense",
         caption,
@@ -630,6 +673,7 @@ def _stat_source_rows_table(statistical: dict[str, Any], rows_key: str, caption:
         "".join(rows),
         "Os valores normativos são fixos; os valores calculados e ERICA são bases para replicações sintéticas exploratórias.",
         intro,
+        table_key=table_keys.get(rows_key, ""),
     )
 
 
@@ -658,6 +702,7 @@ def _stat_descriptive_table(statistical: dict[str, Any]) -> str:
         "".join(rows),
         "As replicações sintéticas exploratórias aumentam N para análise estatística, mas não são medições reais.",
         "Esta tabela apresenta estatística descritiva para os dados calculados por fórmulas e para os dados simulados pelo ERICA Tool. A norma não é randomizada: Report Level e LLD são referências fixas.",
+        table_key="stat_descriptive",
     )
 
 
@@ -686,6 +731,7 @@ def _stat_inferential_table(statistical: dict[str, Any]) -> str:
         "".join(rows),
         "O teste usa log(valor / referência). A hipótese alternativa é ficar abaixo da norma; a norma permanece determinística.",
         "Esta tabela mostra a estatística inferencial dos dados calculados por fórmulas e dos dados simulados pelo ERICA Tool contra as referências normativas disponíveis.",
+        table_key="stat_inferential",
     )
 
 
@@ -712,6 +758,7 @@ def _stat_paired_table(statistical: dict[str, Any]) -> str:
         "".join(rows),
         "A comparação pareada usa log(calculado / ERICA) e tem finalidade exploratória, não validação regulatória final.",
         "Esta tabela avalia a compatibilidade exploratória entre os resultados calculados pela planilha e os resultados simulados pelo ERICA Tool.",
+        table_key="stat_paired",
     )
 
 
@@ -744,6 +791,7 @@ def _empirical_group_table(empirical: dict[str, Any]) -> str:
         "".join(rows),
         empirical.get("mda_policy") or "",
         "Esta tabela separa as amostras reais do TAR por afluente e efluente antes de qualquer cálculo por fórmula.",
+        table_key="empirical_groups",
     )
 
 
@@ -772,6 +820,7 @@ def _empirical_radionuclide_table(empirical: dict[str, Any]) -> str:
         "".join(rows),
         "Nb-95 permanece como observado não modelado porque não há linha equivalente na fórmula da planilha TAR atual.",
         "Esta tabela usa os valores numéricos medidos na planilha de atividade total; entradas < MDA> só contam como censura.",
+        table_key="empirical_radionuclides",
     )
 
 
@@ -800,6 +849,7 @@ def _empirical_modeled_table(empirical: dict[str, Any]) -> str:
         "".join(rows),
         "As frações Si foram calculadas por amostra a partir dos radionuclídeos detectados; < MDA> não participa do denominador.",
         "Esta tabela aplica aos dados reais a mesma lógica da planilha: atividade do radionuclídeo, vazão de diluição e fatores de compartimento ambiental.",
+        table_key="empirical_modeled",
     )
 
 
@@ -830,6 +880,7 @@ def _statistical_comparison_panel(summary: dict[str, Any]) -> str:
   <h2>Estatística calculado vs ERICA vs norma</h2>
   <p>{escape(statistical.get('narrative_text') or '')}</p>
   <p class="table-note">Todas as menções a N nesta seção se referem a replicações sintéticas exploratórias. Esses dados aleatórios não são medições reais e servem apenas para análise estatística exploratória.</p>
+  <p>A estatística descritiva resume dispersão, P95 e CV das replicações; a estatística inferencial compara essas replicações com Report Level e LLD sem transformar a norma em amostra.</p>
   <h3>Dados calculados por fórmulas</h3>
   {_stat_source_rows_table(statistical, "calculated_rows", "Dados calculados por fórmulas de transporte/incorporação", "A planilha TAR fornece concentrações calculadas por fórmulas e modelos de transporte para água, peixe, invertebrado e sedimento.")}
   <h3>Dados simulados pelo ERICA Tool</h3>
@@ -883,6 +934,10 @@ def _base_html(title: str, body: str) -> str:
     .explain-text {{ color: #405862; font-size: 13px; line-height: 1.5; margin: 10px 0 8px; }}
     .explain-box {{ border-left: 4px solid var(--accent); background: #f7fafb; padding: 10px 12px; margin: 12px 0; }}
     .explain-box p {{ color: #405862; font-size: 13px; line-height: 1.5; margin: 6px 0; }}
+    .column-notes-block {{ border-left: 4px solid var(--line); background: #f7fafb; padding: 10px 12px; margin: 10px 0; color: #405862; font-size: 13px; }}
+    .column-notes-block strong {{ display: block; color: #203f49; margin-bottom: 4px; }}
+    .column-notes {{ margin: 4px 0 0 20px; padding: 0; }}
+    .column-notes li {{ margin: 3px 0; line-height: 1.4; }}
     .table-note {{ margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }}
     .tar-chart {{ width: 100%; max-width: 520px; display: block; margin-top: 10px; }}
     .tar-chart--wide {{ max-width: 100%; }}
@@ -1091,7 +1146,7 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
 </section>
 <section class="panel">
   <h2>Comparação com Report Level e LLD</h2>
-  <p>A tabela abaixo aproxima o texto do artigo dos resultados quantitativos atuais. Report Level é tratado como critério de notificação; LLD permanece como referência de detecção.</p>
+  <p>A comparação aproxima o texto do artigo dos resultados quantitativos atuais. Report Level é tratado como critério de notificação; LLD permanece como referência de detecção.</p>
   {_reference_result_table(summary)}
 </section>
 {_hypothetical_panel(summary)}
