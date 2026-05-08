@@ -25,6 +25,12 @@ pip install -r requirements.txt
 python app.py
 ```
 
+Ou pelo PowerShell:
+
+```powershell
+.\iniciar_tar.ps1
+```
+
 Abra:
 
 ```text
