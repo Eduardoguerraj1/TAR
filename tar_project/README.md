@@ -5,8 +5,10 @@ Este pacote concentra o módulo TAR separado do fluxo principal da UAS.
 ## Responsabilidades do pacote
 
 - carregar a planilha `Cópia de TAR.xlsx` ou o caminho definido por `TAR_WORKBOOK_PATH`;
+- carregar a planilha empírica `Atividade Total TAR c radionuclideos.xls` ou o caminho definido por `TAR_ACTIVITY_WORKBOOK_PATH`;
 - tratar `A1` e `A1 e A2` como cenários de cálculo;
 - consolidar concentrações por radionuclídeo e compartimento ambiental;
+- complementar a estatística com dados reais de atividade total TAR separados em afluente e efluente;
 - comparar resultados com Report Level e LLD disponíveis;
 - gerar dashboard, preview HTML e exportações DOCX/PDF do TAR;
 - manter a avaliação estatística do TAR separada da lógica estatística da UAS.

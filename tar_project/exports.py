@@ -59,6 +59,10 @@ SENSITIVITY_RESULTS_EXPLANATION = (
     "como número de ultrapassagens dividido pelo total de simulações. Quando não há Report Level cadastrado, a "
     "probabilidade fica sem referência."
 )
+EMPIRICAL_ACTIVITY_NOTE = (
+    "Valores marcados como menor que MDA são tratados como censurados: entram nas contagens de não detectados, "
+    "mas não entram como valor numérico. A fração Si é calculada por amostra usando apenas radionuclídeos detectados."
+)
 
 CHART_EXPLANATIONS = {
     "Gráfico - Influência das variáveis": SENSITIVITY_TORNADO_EXPLANATION,
@@ -74,6 +78,12 @@ def _format_sci(value: Any) -> str:
     except (TypeError, ValueError):
         return "—"
     return f"{numeric:.2E}".replace("E+0", "E+").replace("E-0", "E-")
+
+
+def _pdf_text(value: Any) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(str(value or ""))
 
 
 def _summary_paragraph(summary: dict[str, Any]) -> str:
@@ -320,6 +330,67 @@ def _sensitivity_chart_images(sensitivity: dict[str, Any]) -> list[tuple[str, By
     ]
 
 
+def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any]) -> None:
+    if not empirical:
+        return
+
+    document.add_heading("Dados reais de atividade total TAR", level=1)
+    document.add_paragraph(empirical.get("narrative_text") or "")
+    document.add_paragraph(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in empirical.get("cards") or []))
+
+    _add_docx_table_caption(document, "Tabela - Resumo por grupo de amostras")
+    group_table = document.add_table(rows=1, cols=8)
+    group_table.style = "Table Grid"
+    for index, header in enumerate(["Grupo", "Amostras", "A-TAR detectado", "A-TAR < MDA", "A-TAR ausente", "Média", "Mediana", "P95"]):
+        group_table.rows[0].cells[index].text = header
+    for item in empirical.get("groups") or []:
+        cells = group_table.add_row().cells
+        cells[0].text = item.get("group", "")
+        cells[1].text = str(item.get("sample_count") or 0)
+        cells[2].text = str(item.get("activity_detected_count") or 0)
+        cells[3].text = str(item.get("activity_censored_count") or 0)
+        cells[4].text = str(item.get("activity_missing_count") or 0)
+        cells[5].text = item.get("activity_mean_text", "—")
+        cells[6].text = item.get("activity_median_text", "—")
+        cells[7].text = item.get("activity_p95_text", "—")
+    _add_docx_table_note(document, EMPIRICAL_ACTIVITY_NOTE)
+
+    _add_docx_table_caption(document, "Tabela - Estatística por radionuclídeo observado")
+    radionuclide_table = document.add_table(rows=1, cols=9)
+    radionuclide_table.style = "Table Grid"
+    for index, header in enumerate(["Grupo", "Radionuclídeo", "Status", "Amostras", "Detectados", "< MDA", "Ausentes", "Taxa det.", "P95"]):
+        radionuclide_table.rows[0].cells[index].text = header
+    for item in empirical.get("radionuclide_rows") or []:
+        cells = radionuclide_table.add_row().cells
+        cells[0].text = item.get("group", "")
+        cells[1].text = item.get("radionuclide", "")
+        cells[2].text = item.get("model_status", "")
+        cells[3].text = str(item.get("sample_count") or 0)
+        cells[4].text = str(item.get("detected_count") or 0)
+        cells[5].text = str(item.get("censored_count") or 0)
+        cells[6].text = str(item.get("missing_count") or 0)
+        cells[7].text = item.get("detected_rate_text", "—")
+        cells[8].text = item.get("p95_text", "—")
+
+    _add_docx_table_caption(document, "Tabela - Resultados calculados por fórmula a partir das amostras reais")
+    modeled_table = document.add_table(rows=1, cols=9)
+    modeled_table.style = "Table Grid"
+    for index, header in enumerate(["Grupo", "Radionuclídeo", "Compart.", "n", "Média", "P95", "Report Level", "P95/RL", "Status"]):
+        modeled_table.rows[0].cells[index].text = header
+    for item in empirical.get("modeled_compartment_rows") or []:
+        cells = modeled_table.add_row().cells
+        cells[0].text = item.get("group", "")
+        cells[1].text = item.get("radionuclide", "")
+        cells[2].text = item.get("compartment", "")
+        cells[3].text = str(item.get("n") or "—")
+        cells[4].text = item.get("mean_text", "—")
+        cells[5].text = item.get("p95_text", "—")
+        cells[6].text = item.get("report_level_text", "—")
+        cells[7].text = item.get("report_level_p95_ratio_text", "—")
+        cells[8].text = item.get("report_level_status", "—")
+    _add_docx_table_note(document, empirical.get("mda_policy") or "")
+
+
 def _add_docx_sensitivity_section(document: Any, sensitivity: dict[str, Any]) -> None:
     if not sensitivity:
         return
@@ -485,6 +556,8 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             cells[7].text = result.get("conclusion") or ""
         _add_docx_table_note(document, HYPOTHETICAL_TEST_NOTE)
 
+    _add_docx_empirical_activity_section(document, scenario.get("empirical_activity_statistics") or {})
+
     _add_docx_sensitivity_section(document, scenario.get("sensitivity") or {})
 
     document.add_heading("Suficiência estatística", level=1)
@@ -573,6 +646,101 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             )
         )
         story.extend([test_table, Paragraph(HYPOTHETICAL_TEST_NOTE, note_style), Spacer(1, 8)])
+
+    empirical = summary["scenario"].get("empirical_activity_statistics") or {}
+    if empirical:
+        story.extend(
+            [
+                Paragraph("Dados reais de atividade total TAR", subheading_style),
+                Paragraph(_pdf_text(empirical.get("narrative_text") or ""), body_style),
+                Paragraph(_pdf_text(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in empirical.get("cards") or [])), body_style),
+                Paragraph(EMPIRICAL_ACTIVITY_NOTE, note_style),
+                Spacer(1, 8),
+                Paragraph("Tabela - Resumo por grupo de amostras", caption_style),
+            ]
+        )
+        group_rows = [["Grupo", "Amostras", "A-TAR det.", "A-TAR < MDA", "Ausente", "Média", "P95"]]
+        for item in empirical.get("groups") or []:
+            group_rows.append(
+                [
+                    item.get("group", ""),
+                    str(item.get("sample_count") or 0),
+                    str(item.get("activity_detected_count") or 0),
+                    str(item.get("activity_censored_count") or 0),
+                    str(item.get("activity_missing_count") or 0),
+                    item.get("activity_mean_text", "—"),
+                    item.get("activity_p95_text", "—"),
+                ]
+            )
+        group_table = Table(group_rows, colWidths=[3.2 * cm, 1.7 * cm, 1.8 * cm, 2.0 * cm, 1.7 * cm, 2.6 * cm, 2.6 * cm], repeatRows=1)
+        group_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 6.7),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        story.extend([group_table, Spacer(1, 8), Paragraph("Tabela - Estatística por radionuclídeo observado", caption_style)])
+
+        radionuclide_rows = [["Grupo", "Radionuclídeo", "Status", "Detect.", "< MDA", "Aus.", "Taxa", "P95"]]
+        for item in empirical.get("radionuclide_rows") or []:
+            radionuclide_rows.append(
+                [
+                    item.get("group", ""),
+                    item.get("radionuclide", ""),
+                    item.get("model_status", ""),
+                    str(item.get("detected_count") or 0),
+                    str(item.get("censored_count") or 0),
+                    str(item.get("missing_count") or 0),
+                    item.get("detected_rate_text", "—"),
+                    item.get("p95_text", "—"),
+                ]
+            )
+        radionuclide_table = Table(radionuclide_rows, colWidths=[2.6 * cm, 1.7 * cm, 2.8 * cm, 1.3 * cm, 1.3 * cm, 1.2 * cm, 1.5 * cm, 2.6 * cm], repeatRows=1)
+        radionuclide_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 5.8),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        story.extend([radionuclide_table, Spacer(1, 8), Paragraph("Tabela - Resultados calculados por fórmula a partir das amostras reais", caption_style)])
+
+        modeled_rows = [["Grupo", "Radionuclídeo", "Compart.", "n", "P95", "RL", "P95/RL", "Status"]]
+        for item in empirical.get("modeled_compartment_rows") or []:
+            modeled_rows.append(
+                [
+                    item.get("group", ""),
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    str(item.get("n") or "—"),
+                    item.get("p95_text", "—"),
+                    item.get("report_level_text", "—"),
+                    item.get("report_level_p95_ratio_text", "—"),
+                    item.get("report_level_status", "—"),
+                ]
+            )
+        modeled_table = Table(modeled_rows, colWidths=[2.4 * cm, 1.7 * cm, 2.2 * cm, 1.0 * cm, 2.2 * cm, 2.2 * cm, 1.7 * cm, 1.5 * cm], repeatRows=1)
+        modeled_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 5.2),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        story.extend([modeled_table, Spacer(1, 8)])
 
     sensitivity = summary["scenario"].get("sensitivity") or {}
     if sensitivity:

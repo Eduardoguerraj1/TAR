@@ -42,4 +42,5 @@ waitress-serve --host=0.0.0.0 --port=$PORT wsgi:application
 Variáveis esperadas:
 
 - `TAR_WORKBOOK_PATH=./Cópia de TAR.xlsx`
+- `TAR_ACTIVITY_WORKBOOK_PATH=./Atividade Total TAR c radionuclideos.xls`
 - `TAR_ARTICLE_PATH=./Artigo TAR1 correção.pdf`

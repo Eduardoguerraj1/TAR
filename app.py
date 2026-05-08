@@ -41,6 +41,10 @@ def json_ready(value: Any) -> Any:
 app = Flask(__name__)
 
 TAR_WORKBOOK_PATH = resolve_config_path("TAR_WORKBOOK_PATH", BASE_DIR / "Cópia de TAR.xlsx")
+TAR_ACTIVITY_WORKBOOK_PATH = resolve_config_path(
+    "TAR_ACTIVITY_WORKBOOK_PATH",
+    BASE_DIR / "Atividade Total TAR c radionuclideos.xls",
+)
 TAR_ARTICLE_PATH = resolve_config_path("TAR_ARTICLE_PATH", BASE_DIR / "Artigo TAR1 correção.pdf")
 
 
@@ -48,6 +52,7 @@ def current_tar_summary() -> dict[str, Any]:
     return build_tar_summary(
         TAR_WORKBOOK_PATH,
         request.args.get("scenario", "a1"),
+        activity_workbook_path=TAR_ACTIVITY_WORKBOOK_PATH,
         hypothetical_n=request.args.get("n", 60),
         hypothetical_seed=request.args.get("seed", 20260504),
         sensitivity_n=request.args.get("sensitivity_n", 10000),
@@ -60,7 +65,14 @@ def current_tar_summary() -> dict[str, Any]:
 def tar_error_response(exc: Exception, *, as_json: bool = False):
     message = str(exc)
     if as_json:
-        return jsonify({"ok": False, "error": message, "workbook_path": str(TAR_WORKBOOK_PATH)}), 500
+        return jsonify(
+            {
+                "ok": False,
+                "error": message,
+                "workbook_path": str(TAR_WORKBOOK_PATH),
+                "activity_workbook_path": str(TAR_ACTIVITY_WORKBOOK_PATH),
+            }
+        ), 500
     return Response(message, status=500, content_type="text/plain; charset=utf-8")
 
 
@@ -76,6 +88,7 @@ def healthz():
             "ok": True,
             "service": "tar-beta",
             "workbook_path": str(TAR_WORKBOOK_PATH),
+            "activity_workbook_path": str(TAR_ACTIVITY_WORKBOOK_PATH),
             "article_path": str(TAR_ARTICLE_PATH),
         }
     )

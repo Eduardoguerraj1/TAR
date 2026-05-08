@@ -715,6 +715,112 @@ def _stat_paired_table(statistical: dict[str, Any]) -> str:
     )
 
 
+def _empirical_cards(empirical: dict[str, Any]) -> str:
+    return "".join(
+        f'<div class="card"><span>{escape(str(card.get("label") or ""))}</span><strong>{escape(str(card.get("value") or "—"))}</strong></div>'
+        for card in empirical.get("cards") or []
+    )
+
+
+def _empirical_group_table(empirical: dict[str, Any]) -> str:
+    rows = []
+    for item in empirical.get("groups") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('group') or '')}</td>"
+            f"<td>{escape(str(item.get('sample_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('activity_detected_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('activity_censored_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('activity_missing_count') or 0))}</td>"
+            f"<td>{escape(item.get('activity_mean_text') or '—')}</td>"
+            f"<td>{escape(item.get('activity_median_text') or '—')}</td>"
+            f"<td>{escape(item.get('activity_p95_text') or '—')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Resumo por grupo de amostras",
+        "<tr><th>Grupo</th><th>Amostras</th><th>A-TAR detectado</th><th>A-TAR &lt; MDA</th><th>A-TAR ausente</th><th>Média A-TAR</th><th>Mediana A-TAR</th><th>P95 A-TAR</th></tr>",
+        "".join(rows),
+        empirical.get("mda_policy") or "",
+        "Esta tabela separa as amostras reais do TAR por afluente e efluente antes de qualquer cálculo por fórmula.",
+    )
+
+
+def _empirical_radionuclide_table(empirical: dict[str, Any]) -> str:
+    rows = []
+    for item in empirical.get("radionuclide_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('group') or '')}</td>"
+            f"<td>{escape(item.get('radionuclide') or '')}</td>"
+            f"<td>{escape(item.get('model_status') or '')}</td>"
+            f"<td>{escape(str(item.get('sample_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('detected_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('censored_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('missing_count') or 0))}</td>"
+            f"<td>{escape(item.get('detected_rate_text') or '—')}</td>"
+            f"<td>{escape(item.get('mean_text') or '—')}</td>"
+            f"<td>{escape(item.get('median_text') or '—')}</td>"
+            f"<td>{escape(item.get('p95_text') or '—')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Estatística descritiva por radionuclídeo observado",
+        "<tr><th>Grupo</th><th>Radionuclídeo</th><th>Status no modelo</th><th>Amostras</th><th>Detectados</th><th>&lt; MDA</th><th>Ausentes</th><th>Taxa detectada</th><th>Média</th><th>Mediana</th><th>P95</th></tr>",
+        "".join(rows),
+        "Nb-95 permanece como observado não modelado porque não há linha equivalente na fórmula da planilha TAR atual.",
+        "Esta tabela usa os valores numéricos medidos na planilha de atividade total; entradas < MDA> só contam como censura.",
+    )
+
+
+def _empirical_modeled_table(empirical: dict[str, Any]) -> str:
+    rows = []
+    for item in empirical.get("modeled_compartment_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('group') or '')}</td>"
+            f"<td>{escape(item.get('radionuclide') or '')}</td>"
+            f"<td>{escape(item.get('compartment') or '')}</td>"
+            f"<td>{escape(str(item.get('n') or '—'))}</td>"
+            f"<td>{escape(item.get('mean_text') or '—')}</td>"
+            f"<td>{escape(item.get('median_text') or '—')}</td>"
+            f"<td>{escape(item.get('p95_text') or '—')}</td>"
+            f"<td>{escape(item.get('report_level_text') or '—')}</td>"
+            f"<td>{escape(item.get('report_level_p95_ratio_text') or '—')}</td>"
+            f'<td><span class="pill {_status_class(str(item.get("report_level_status") or ""))}">{escape(item.get("report_level_status") or "—")}</span></td>'
+            f"<td>{escape(item.get('report_level_exceedance_rate_text') or '—')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Resultados calculados por fórmula a partir das amostras reais",
+        "<tr><th>Grupo</th><th>Radionuclídeo</th><th>Compartimento</th><th>n</th><th>Média</th><th>Mediana</th><th>P95</th><th>Report Level</th><th>P95 / Report Level</th><th>Status</th><th>Freq. &gt; Report Level</th></tr>",
+        "".join(rows),
+        "As frações Si foram calculadas por amostra a partir dos radionuclídeos detectados; < MDA> não participa do denominador.",
+        "Esta tabela aplica aos dados reais a mesma lógica da planilha: atividade do radionuclídeo, vazão de diluição e fatores de compartimento ambiental.",
+    )
+
+
+def _empirical_activity_panel(summary: dict[str, Any]) -> str:
+    empirical = (summary.get("scenario") or {}).get("empirical_activity_statistics") or {}
+    if not empirical:
+        return ""
+    unmodeled = ", ".join(empirical.get("unmodeled_radionuclides") or []) or "nenhum"
+    return f"""
+<section class="panel">
+  <h2>Dados reais de atividade total TAR</h2>
+  <p>{escape(empirical.get('narrative_text') or '')}</p>
+  <p class="table-note">Fonte: {escape(str(empirical.get('source_workbook_path') or ''))}, aba {escape(str(empirical.get('source_sheet') or ''))}. Radionuclídeos observados não modelados: {escape(unmodeled)}.</p>
+  <div class="cards sensitivity-cards">{_empirical_cards(empirical)}</div>
+  {_empirical_group_table(empirical)}
+  {_empirical_radionuclide_table(empirical)}
+  {_empirical_modeled_table(empirical)}
+</section>
+"""
+
+
 def _statistical_comparison_panel(summary: dict[str, Any]) -> str:
     statistical = (summary.get("scenario") or {}).get("statistical_comparison") or {}
     if not statistical:
@@ -861,6 +967,7 @@ def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
   {_reference_result_table(summary)}
 </section>
 {_hypothetical_panel(summary)}
+{_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
 <section class="panel">
   <h2>Suficiência estatística</h2>
@@ -893,6 +1000,7 @@ def render_tar_report_html(summary: dict[str, Any]) -> str:
   {_reference_result_table(summary)}
 </section>
 {_hypothetical_panel(summary)}
+{_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
 <section class="panel">
   <h2>Suficiência estatística</h2>
@@ -987,6 +1095,7 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
   {_reference_result_table(summary)}
 </section>
 {_hypothetical_panel(summary)}
+{_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
 <section class="panel">
   <h2>Suficiência estatística</h2>

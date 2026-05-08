@@ -22,6 +22,9 @@ SCENARIOS: dict[str, dict[str, str]] = {
 }
 
 EXPECTED_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54", "Sb-124", "Sb-125", "Zr-95"]
+EMPIRICAL_ACTIVITY_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54", "Nb-95", "Sb-124", "Sb-125", "Zr-95"]
+EMPIRICAL_ACTIVITY_GROUPS = ["TAR - Afluente", "TAR - Efluente"]
+EMPIRICAL_ACTIVITY_DEFAULT_FILENAME = "Atividade Total TAR c radionuclideos.xls"
 
 COMPARTMENTS: list[dict[str, Any]] = [
     {
@@ -653,6 +656,340 @@ def _stats_summary_with_text(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _is_mda_marker(value: Any) -> bool:
+    return isinstance(value, str) and "MDA" in value.upper()
+
+
+def _raw_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if _is_number(value):
+        return _format_scientific(float(value))
+    return str(value)
+
+
+def _format_count(value: int) -> str:
+    return f"{value:,}".replace(",", ".")
+
+
+def _empirical_activity_path(workbook_path: str | Path, activity_workbook_path: str | Path | None) -> Path:
+    if activity_workbook_path is not None:
+        return Path(activity_workbook_path)
+    return Path(workbook_path).resolve().parent / EMPIRICAL_ACTIVITY_DEFAULT_FILENAME
+
+
+def _load_empirical_activity_records(path: str | Path) -> dict[str, Any]:
+    activity_path = Path(path)
+    if not activity_path.exists():
+        raise TarWorkbookError(f"Planilha de atividade total TAR não encontrada: {activity_path}")
+    try:
+        import xlrd
+    except Exception as exc:  # pragma: no cover - exercised only when dependency is missing
+        raise TarWorkbookError("A biblioteca xlrd não está disponível para ler a planilha .xls de atividade total TAR.") from exc
+
+    try:
+        workbook = xlrd.open_workbook(str(activity_path))
+    except Exception as exc:
+        raise TarWorkbookError(f"Não foi possível abrir a planilha de atividade total TAR: {exc}") from exc
+    if not workbook.sheet_names():
+        raise TarWorkbookError("A planilha de atividade total TAR não contém abas.")
+
+    sheet = workbook.sheet_by_index(0)
+    headers = [" ".join(str(sheet.cell_value(0, col)).split()) for col in range(sheet.ncols)]
+    radionuclide_columns: dict[str, int] = {}
+    for col, header in enumerate(headers):
+        match = re.match(r"^([A-Z][a-z]?-\d+)\b", header)
+        if match and match.group(1) in EMPIRICAL_ACTIVITY_RADIONUCLIDES:
+            radionuclide_columns[match.group(1)] = col
+    missing = [radionuclide for radionuclide in EMPIRICAL_ACTIVITY_RADIONUCLIDES if radionuclide not in radionuclide_columns]
+    if missing:
+        raise TarWorkbookError(f"Radionuclídeos ausentes na planilha de atividade total TAR: {', '.join(missing)}")
+
+    records: list[dict[str, Any]] = []
+    for row_index in range(1, sheet.nrows):
+        sample_id = str(sheet.cell_value(row_index, 0)).strip()
+        group = " ".join(str(sheet.cell_value(row_index, 1)).split())
+        if not sample_id and not group:
+            continue
+        if group not in EMPIRICAL_ACTIVITY_GROUPS:
+            continue
+
+        date_value = sheet.cell_value(row_index, 2)
+        date_text = ""
+        if _is_number(date_value):
+            try:
+                date_text = xlrd.xldate_as_datetime(float(date_value), workbook.datemode).date().isoformat()
+            except Exception:
+                date_text = _raw_text(date_value)
+        else:
+            date_text = _raw_text(date_value)
+
+        activity_raw = sheet.cell_value(row_index, 3)
+        activity_total_bq = _to_float(activity_raw)
+        radionuclides: dict[str, dict[str, Any]] = {}
+        for radionuclide, col in radionuclide_columns.items():
+            raw_value = sheet.cell_value(row_index, col)
+            value = _to_float(raw_value)
+            censored = _is_mda_marker(raw_value)
+            missing_value = raw_value in ("", None)
+            status = "detectado" if value is not None else "censurado" if censored else "ausente"
+            radionuclides[radionuclide] = {
+                "value": value,
+                "raw_text": _raw_text(raw_value),
+                "status": status,
+                "censored": censored,
+                "missing": missing_value,
+            }
+
+        records.append(
+            {
+                "row": row_index + 1,
+                "sample_id": sample_id,
+                "group": group,
+                "date": date_text,
+                "activity_total_bq": activity_total_bq,
+                "activity_total_raw_text": _raw_text(activity_raw),
+                "activity_total_censored": _is_mda_marker(activity_raw),
+                "activity_total_missing": activity_raw in ("", None),
+                "radionuclides": radionuclides,
+            }
+        )
+
+    return {
+        "path": str(activity_path),
+        "sheet": sheet.name,
+        "headers": headers,
+        "records": records,
+    }
+
+
+def _scenario_row_by_radionuclide(scenario: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["radionuclide"]: row for row in scenario.get("rows") or []}
+
+
+def _scenario_compartment_multipliers(scenario_row: dict[str, Any]) -> dict[str, float | None]:
+    compartments = scenario_row.get("compartments") or {}
+    water_value = (compartments.get("water") or {}).get("value")
+    multipliers: dict[str, float | None] = {"water": 1.0}
+    for compartment in COMPARTMENTS:
+        key = compartment["key"]
+        if key == "water":
+            continue
+        value = (compartments.get(key) or {}).get("value")
+        multipliers[key] = (float(value) / float(water_value)) if value is not None and water_value not in (None, 0) else None
+    return multipliers
+
+
+def _group_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    return {
+        group: [record for record in records if record.get("group") == group]
+        for group in EMPIRICAL_ACTIVITY_GROUPS
+    }
+
+
+def _reference_summary(values: list[float], reference: float | None) -> dict[str, Any]:
+    stats_summary = _summary_stats(values)
+    p95 = stats_summary.get("p95")
+    ratio = p95 / reference if p95 is not None and reference is not None and reference > 0 else None
+    exceedance_count = sum(1 for value in values if reference is not None and reference > 0 and value > reference)
+    exceedance_rate = exceedance_count / len(values) if values and reference is not None and reference > 0 else None
+    return {
+        "reference": reference,
+        "reference_text": _format_scientific(reference),
+        "p95_ratio": ratio,
+        "p95_ratio_text": _format_decimal(ratio),
+        "status": "sem referência" if ratio is None else "abaixo" if ratio <= 1.0 else "acima",
+        "exceedance_count": exceedance_count if exceedance_rate is not None else None,
+        "exceedance_rate": exceedance_rate,
+        "exceedance_rate_text": _format_percent(exceedance_rate),
+    }
+
+
+def _empirical_group_summaries(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for group, records in grouped.items():
+        activity_values = [record["activity_total_bq"] for record in records if record.get("activity_total_bq") is not None]
+        stats_summary = _stats_summary_with_text(activity_values)
+        summaries.append(
+            {
+                "group": group,
+                "sample_count": len(records),
+                "activity_detected_count": len(activity_values),
+                "activity_censored_count": sum(1 for record in records if record.get("activity_total_censored")),
+                "activity_missing_count": sum(1 for record in records if record.get("activity_total_missing")),
+                "activity_unit": "Bq",
+                "activity_stats": stats_summary,
+                "activity_mean_text": stats_summary["mean_text"],
+                "activity_median_text": stats_summary["median_text"],
+                "activity_p95_text": stats_summary["p95_text"],
+            }
+        )
+    return summaries
+
+
+def _empirical_radionuclide_rows(
+    grouped: dict[str, list[dict[str, Any]]],
+    modeled_radionuclides: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for group, records in grouped.items():
+        for radionuclide in EMPIRICAL_ACTIVITY_RADIONUCLIDES:
+            values = [
+                record["radionuclides"][radionuclide]["value"]
+                for record in records
+                if record["radionuclides"][radionuclide]["value"] is not None
+            ]
+            censored_count = sum(1 for record in records if record["radionuclides"][radionuclide]["censored"])
+            missing_count = sum(1 for record in records if record["radionuclides"][radionuclide]["missing"])
+            detected_count = len(values)
+            sample_count = len(records)
+            stats_summary = _stats_summary_with_text(values)
+            rows.append(
+                {
+                    "group": group,
+                    "radionuclide": radionuclide,
+                    "unit": "Bq/kg",
+                    "sample_count": sample_count,
+                    "detected_count": detected_count,
+                    "censored_count": censored_count,
+                    "missing_count": missing_count,
+                    "detected_rate": detected_count / sample_count if sample_count else None,
+                    "detected_rate_text": _format_percent(detected_count / sample_count if sample_count else None),
+                    "model_status": "modelado" if radionuclide in modeled_radionuclides else "observado não modelado",
+                    **stats_summary,
+                }
+            )
+    return rows
+
+
+def _empirical_modeled_compartment_rows(
+    scenario: dict[str, Any],
+    grouped: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    scenario_rows = _scenario_row_by_radionuclide(scenario)
+    flow = (scenario.get("totals") or {}).get("circulation_flow_m3_year") or DEFAULT_DILUTION_FLOW_M3_YEAR
+    sample_values: dict[tuple[str, str, str], list[float]] = {}
+    for group in EMPIRICAL_ACTIVITY_GROUPS:
+        for radionuclide in scenario_rows:
+            for compartment in COMPARTMENTS:
+                sample_values[(group, radionuclide, compartment["key"])] = []
+
+    for group, records in grouped.items():
+        for record in records:
+            total_activity = record.get("activity_total_bq")
+            detected_sum = sum(
+                float(data["value"])
+                for data in record.get("radionuclides", {}).values()
+                if data.get("value") is not None and data["value"] > 0
+            )
+            if total_activity is None or total_activity <= 0 or detected_sum <= 0 or flow <= 0:
+                continue
+            for radionuclide, data in record.get("radionuclides", {}).items():
+                detected_value = data.get("value")
+                if detected_value is None or detected_value <= 0 or radionuclide not in scenario_rows:
+                    continue
+                fraction = float(detected_value) / detected_sum
+                activity_bq = float(total_activity) * fraction
+                water_value = activity_bq / float(flow)
+                multipliers = _scenario_compartment_multipliers(scenario_rows[radionuclide])
+                for compartment in COMPARTMENTS:
+                    multiplier = multipliers.get(compartment["key"])
+                    if multiplier is None:
+                        continue
+                    sample_values[(group, radionuclide, compartment["key"])].append(water_value * multiplier)
+
+    rows: list[dict[str, Any]] = []
+    for group in EMPIRICAL_ACTIVITY_GROUPS:
+        for radionuclide in EXPECTED_RADIONUCLIDES:
+            scenario_row = scenario_rows.get(radionuclide)
+            if not scenario_row:
+                continue
+            for compartment in COMPARTMENTS:
+                key = compartment["key"]
+                values = sample_values.get((group, radionuclide, key), [])
+                stats_summary = _stats_summary_with_text(values)
+                base_data = scenario_row["compartments"][key]
+                report = _reference_summary(values, base_data.get("report_level"))
+                lld = _reference_summary(values, base_data.get("lld"))
+                rows.append(
+                    {
+                        "group": group,
+                        "radionuclide": radionuclide,
+                        "compartment_key": key,
+                        "compartment": compartment["label"],
+                        "unit": compartment["unit"],
+                        **stats_summary,
+                        "report_level": report["reference"],
+                        "report_level_text": report["reference_text"],
+                        "report_level_p95_ratio": report["p95_ratio"],
+                        "report_level_p95_ratio_text": report["p95_ratio_text"],
+                        "report_level_status": report["status"],
+                        "report_level_exceedance_count": report["exceedance_count"],
+                        "report_level_exceedance_rate": report["exceedance_rate"],
+                        "report_level_exceedance_rate_text": report["exceedance_rate_text"],
+                        "lld": lld["reference"],
+                        "lld_text": lld["reference_text"],
+                        "lld_p95_ratio": lld["p95_ratio"],
+                        "lld_p95_ratio_text": lld["p95_ratio_text"],
+                        "lld_status": lld["status"],
+                        "lld_exceedance_count": lld["exceedance_count"],
+                        "lld_exceedance_rate": lld["exceedance_rate"],
+                        "lld_exceedance_rate_text": lld["exceedance_rate_text"],
+                    }
+                )
+    return rows
+
+
+def _build_empirical_activity_statistics(
+    scenario: dict[str, Any],
+    *,
+    activity_workbook_path: str | Path,
+) -> dict[str, Any]:
+    loaded = _load_empirical_activity_records(activity_workbook_path)
+    records = loaded["records"]
+    grouped = _group_records(records)
+    modeled_radionuclides = set(_scenario_row_by_radionuclide(scenario))
+    unmodeled_radionuclides = [
+        radionuclide
+        for radionuclide in EMPIRICAL_ACTIVITY_RADIONUCLIDES
+        if radionuclide not in modeled_radionuclides
+    ]
+    group_summaries = _empirical_group_summaries(grouped)
+    radionuclide_rows = _empirical_radionuclide_rows(grouped, modeled_radionuclides)
+    modeled_compartment_rows = _empirical_modeled_compartment_rows(scenario, grouped)
+    group_counts = {summary["group"]: summary["sample_count"] for summary in group_summaries}
+    narrative_text = (
+        "A estatística empírica usa as medições reais de atividade total TAR de 2019 a 2023, separando TAR - Afluente "
+        "e TAR - Efluente. Valores marcados como < MDA> são tratados como censurados: entram nas contagens de não "
+        "detectados, mas não entram como valor numérico. Para cada amostra com A-TAR numérico, a fração Si foi calculada "
+        "a partir dos radionuclídeos detectados e aplicada à atividade total; em seguida, foram reutilizados a vazão e "
+        "os fatores de água, peixe, invertebrado e sedimento da planilha TAR selecionada."
+    )
+    return {
+        "synthetic": False,
+        "source_workbook_path": loaded["path"],
+        "source_sheet": loaded["sheet"],
+        "source_note": "Dados reais de atividade total TAR; < MDA> tratado como dado censurado.",
+        "mda_policy": "< MDA> não é convertido para zero nem MDA/2; é contado como censurado e excluído dos cálculos numéricos.",
+        "groups": group_summaries,
+        "group_counts": group_counts,
+        "observed_radionuclides": EMPIRICAL_ACTIVITY_RADIONUCLIDES,
+        "modeled_radionuclides": [radionuclide for radionuclide in EXPECTED_RADIONUCLIDES if radionuclide in modeled_radionuclides],
+        "unmodeled_radionuclides": unmodeled_radionuclides,
+        "radionuclide_rows": radionuclide_rows,
+        "modeled_compartment_rows": modeled_compartment_rows,
+        "narrative_text": narrative_text,
+        "cards": [
+            {"label": "Amostras afluente", "value": _format_count(group_counts.get("TAR - Afluente", 0))},
+            {"label": "Amostras efluente", "value": _format_count(group_counts.get("TAR - Efluente", 0))},
+            {"label": "Política MDA", "value": "censurado"},
+            {"label": "Observado não modelado", "value": ", ".join(unmodeled_radionuclides) or "—"},
+        ],
+    }
+
+
 def _synthetic_replicates(base_value: float | None, count: int, rng: random.Random) -> list[float]:
     if base_value is None or base_value <= 0:
         return []
@@ -1239,6 +1576,7 @@ def build_tar_summary(
     workbook_path: str | Path,
     scenario: Any = "a1",
     *,
+    activity_workbook_path: str | Path | None = None,
     hypothetical_n: Any = 60,
     hypothetical_seed: Any = 20260504,
     sensitivity_n: Any = DEFAULT_SENSITIVITY_N,
@@ -1269,9 +1607,15 @@ def build_tar_summary(
         sample_count=resolved_stat_n,
         seed=resolved_stat_seed,
     )
+    resolved_activity_path = _empirical_activity_path(workbook_path, activity_workbook_path)
+    scenario_model["empirical_activity_statistics"] = _build_empirical_activity_statistics(
+        scenario_model,
+        activity_workbook_path=resolved_activity_path,
+    )
     return {
         "ok": True,
         "workbook_path": model["workbook_path"],
+        "activity_workbook_path": str(resolved_activity_path),
         "selected_scenario": scenario_key,
         "available_scenarios": [
             {"key": key, "label": value["label"], "sheet": value["sheet"]}
