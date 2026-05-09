@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from io import BytesIO
 from typing import Any
 
@@ -63,6 +64,15 @@ SENSITIVITY_RESULTS_EXPLANATION = (
 EMPIRICAL_ACTIVITY_NOTE = (
     "Valores marcados como menor que MDA são tratados como censurados: entram nas contagens de não detectados, "
     "mas não entram como valor numérico. A fração Si é calculada por amostra usando apenas radionuclídeos detectados."
+)
+REPORT_FULL_TITLE = (
+    "Avaliação do risco radiológico ambiental em ambiente marinho e seus compartimentos "
+    "a partir de uma liberação não planejada em uma usina nuclear do tipo PWR"
+)
+ERICA_RATIO_CHART_EXPLANATION = (
+    "Os gráficos da razão calculado/ERICA complementam os testes inferenciais. A linha em 1 representa equivalência "
+    "entre a concentração obtida por fórmulas e o ERICA Tool; pontos acima de 1 indicam cálculo maior que ERICA, "
+    "e pontos abaixo de 1 indicam cálculo menor. A escala log10 reduz o efeito de valores extremos."
 )
 
 CHART_EXPLANATIONS = {
@@ -134,17 +144,18 @@ def _table_note_parts(table_key: str, *, note: str = "", source_note: str = "", 
 def _add_docx_table_intro(document: Any, table_key: str) -> None:
     meta = tar_table_meta(table_key)
     document.add_paragraph(meta["lead_text"])
-    if meta.get("column_notes"):
-        paragraph = document.add_paragraph()
-        paragraph.add_run("Leitura das colunas").bold = True
-        for index, note in enumerate(meta["column_notes"], start=1):
-            document.add_paragraph(f"{index}. {note}")
     _add_docx_table_caption(document, meta["display_caption"])
 
 
 def _add_docx_table_notes(document: Any, table_key: str, *, note: str = "", source_note: str = "", unit_note: str = "") -> None:
     for part in _table_note_parts(table_key, note=note, source_note=source_note, unit_note=unit_note):
         _add_docx_table_note(document, part)
+    meta = tar_table_meta(table_key)
+    if meta.get("column_notes"):
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Leitura das colunas").bold = True
+        for index, column_note in enumerate(meta["column_notes"], start=1):
+            document.add_paragraph(f"{index}. {column_note}")
 
 
 def _append_pdf_table_intro(story: list[Any], table_key: str, body_style: Any, caption_style: Any) -> None:
@@ -152,10 +163,6 @@ def _append_pdf_table_intro(story: list[Any], table_key: str, body_style: Any, c
 
     meta = tar_table_meta(table_key)
     story.append(Paragraph(_pdf_text(meta["lead_text"]), body_style))
-    if meta.get("column_notes"):
-        story.append(Paragraph("<b>Leitura das colunas</b>", body_style))
-        for index, note in enumerate(meta["column_notes"], start=1):
-            story.append(Paragraph(f"{index}. {_pdf_text(note)}", body_style))
     story.append(Paragraph(_pdf_text(meta["display_caption"]), caption_style))
 
 
@@ -172,15 +179,20 @@ def _append_pdf_table_notes(
 
     for part in _table_note_parts(table_key, note=note, source_note=source_note, unit_note=unit_note):
         story.append(Paragraph(_pdf_text(part), note_style))
+    meta = tar_table_meta(table_key)
+    if meta.get("column_notes"):
+        story.append(Paragraph("<b>Leitura das colunas</b>", note_style))
+        for index, column_note in enumerate(meta["column_notes"], start=1):
+            story.append(Paragraph(f"{index}. {_pdf_text(column_note)}", note_style))
 
 
 def _load_pillow_font(size: int, *, bold: bool = False) -> Any:
     from PIL import ImageFont
 
     candidates = (
-        ["C:/Windows/Fonts/arialbd.ttf", "DejaVuSans-Bold.ttf"]
+        ["C:/Windows/Fonts/timesbd.ttf", "DejaVuSerif-Bold.ttf"]
         if bold
-        else ["C:/Windows/Fonts/arial.ttf", "DejaVuSans.ttf"]
+        else ["C:/Windows/Fonts/times.ttf", "DejaVuSerif.ttf"]
     )
     for candidate in candidates:
         try:
@@ -386,6 +398,239 @@ def _sensitivity_chart_images(sensitivity: dict[str, Any]) -> list[tuple[str, By
     ]
 
 
+def _ratio_domain(values: list[float]) -> tuple[float, float]:
+    positive = [float(value) for value in values if value and float(value) > 0]
+    if not positive:
+        return 0.1, 10.0
+    lower = 10 ** math.floor(math.log10(min([1.0, *positive])))
+    upper = 10 ** math.ceil(math.log10(max([1.0, *positive])))
+    if upper <= lower:
+        upper = lower * 10
+    return lower, upper
+
+
+def _log_position(value: float, lower: float, upper: float, start: float, size: float, *, invert: bool = False) -> float:
+    safe_value = max(lower, min(upper, float(value)))
+    lower_log = math.log10(lower)
+    upper_log = math.log10(upper)
+    if upper_log <= lower_log:
+        return start
+    ratio = (math.log10(safe_value) - lower_log) / (upper_log - lower_log)
+    return start + (1 - ratio) * size if invert else start + ratio * size
+
+
+def _chart_color(label: str) -> str:
+    palette = {
+        "Água": "#27667b",
+        "Peixe": "#2d8577",
+        "Invertebrado": "#9b6a2f",
+        "Sedimento": "#6b4aa0",
+    }
+    return palette.get(label, "#52616a")
+
+
+def _erica_ratio_boxplot_png(review: dict[str, Any]) -> tuple[BytesIO, int, int]:
+    scopes = (review.get("erica_chart_payloads") or {}).get("scope_rows") or []
+    values: list[float] = []
+    for scope in scopes:
+        stats = scope.get("stats") or {}
+        values.extend(float(stats[key]) for key in ["min", "q1", "median", "q3", "max", "p95"] if stats.get(key) is not None and float(stats[key]) > 0)
+    lower, upper = _ratio_domain(values)
+    width = 1050
+    left = 175
+    right = 55
+    top = 70
+    row_height = 62
+    height = top + max(1, len(scopes)) * row_height + 58
+    plot_width = width - left - right
+    image, draw, buffer, _ = _chart_png_buffer(width, height)
+    font = _load_pillow_font(17)
+    small = _load_pillow_font(14)
+    title_font = _load_pillow_font(22, bold=True)
+    draw.text((24, 20), "Boxplot da razão calculado / ERICA", fill="#1d252c", font=title_font)
+    ref_x = _log_position(1.0, lower, upper, left, plot_width)
+    draw.line((ref_x, 52, ref_x, height - 34), fill="#b8423a", width=3)
+    draw.text((ref_x + 8, 54), "razão = 1", fill="#b8423a", font=small)
+    for index, scope in enumerate(scopes):
+        stats = scope.get("stats") or {}
+        if not stats.get("n"):
+            continue
+        y = top + index * row_height
+        label = str(scope.get("scope_label") or "")
+        color = _chart_color(label)
+        min_x = _log_position(float(stats["min"]), lower, upper, left, plot_width)
+        q1_x = _log_position(float(stats["q1"]), lower, upper, left, plot_width)
+        med_x = _log_position(float(stats["median"]), lower, upper, left, plot_width)
+        q3_x = _log_position(float(stats["q3"]), lower, upper, left, plot_width)
+        max_x = _log_position(float(stats["max"]), lower, upper, left, plot_width)
+        p95_x = _log_position(float(stats["p95"]), lower, upper, left, plot_width)
+        draw.text((24, y + 16), f"{label} (n={scope.get('n') or 0})", fill="#1d252c", font=font)
+        draw.line((min_x, y + 24, max_x, y + 24), fill=color, width=3)
+        draw.line((min_x, y + 10, min_x, y + 38), fill=color, width=3)
+        draw.line((max_x, y + 10, max_x, y + 38), fill=color, width=3)
+        draw.rectangle((q1_x, y + 6, max(q1_x + 4, q3_x), y + 42), fill="#eef7f3", outline=color, width=3)
+        draw.line((med_x, y + 6, med_x, y + 42), fill="#1d252c", width=4)
+        draw.ellipse((p95_x - 5, y + 19, p95_x + 5, y + 29), fill="#6b4aa0")
+        draw.text((left + plot_width - 220, y + 45), f"mediana {stats.get('median_text') or '—'} | P95 {stats.get('p95_text') or '—'}", fill="#52616a", font=small)
+    draw.text((left + 250, height - 22), "Escala log10 da razão calculado / ERICA", fill="#1d252c", font=small)
+    return _finish_png(image, buffer), width, height
+
+
+def _erica_ratio_scatter_png(scope: dict[str, Any]) -> tuple[BytesIO, int, int]:
+    points = [point for point in scope.get("points") or [] if point.get("ratio") is not None and float(point["ratio"]) > 0]
+    ratios = [float(point["ratio"]) for point in points]
+    lower, upper = _ratio_domain(ratios)
+    dates = sorted({str(point.get("date") or "") for point in points})
+    date_index = {date: index for index, date in enumerate(dates)}
+    width = 1050
+    height = 390
+    left = 82
+    right = 42
+    top = 68
+    bottom = 74
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    image, draw, buffer, _ = _chart_png_buffer(width, height)
+    font = _load_pillow_font(15)
+    title_font = _load_pillow_font(22, bold=True)
+    draw.text((24, 20), f"{scope.get('scope_label') or ''}: pontos da razão calculado / ERICA", fill="#1d252c", font=title_font)
+    draw.rectangle((left, top, left + plot_width, top + plot_height), outline="#d6ddd9", fill="#fbfdfc")
+    ref_y = _log_position(1.0, lower, upper, top, plot_height, invert=True)
+    draw.line((left, ref_y, left + plot_width, ref_y), fill="#b8423a", width=3)
+    draw.text((left + 8, ref_y - 22), "razão = 1", fill="#b8423a", font=font)
+
+    def x_at(date_value: Any) -> float:
+        if len(dates) <= 1:
+            return left + plot_width / 2
+        return left + (date_index.get(str(date_value), 0) / (len(dates) - 1)) * plot_width
+
+    for point in points:
+        ratio = float(point["ratio"])
+        cx = x_at(point.get("date"))
+        cy = _log_position(ratio, lower, upper, top, plot_height, invert=True)
+        color = _chart_color(str(point.get("compartment") or scope.get("scope_label") or ""))
+        if point.get("erica_generated"):
+            draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill="#ffffff", outline="#1d252c", width=2)
+        else:
+            draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=color, outline=color)
+    if dates:
+        draw.text((left, height - 48), dates[0], fill="#52616a", font=font)
+        end_text = dates[-1]
+        draw.text((left + plot_width - 90, height - 48), end_text, fill="#52616a", font=font)
+    draw.text((left + 330, height - 20), "Data da amostra", fill="#1d252c", font=font)
+    return _finish_png(image, buffer), width, height
+
+
+def _erica_ratio_heatmap_png(review: dict[str, Any]) -> tuple[BytesIO, int, int]:
+    heatmap = (review.get("erica_chart_payloads") or {}).get("heatmap") or {}
+    radionuclides = heatmap.get("radionuclides") or []
+    compartments = heatmap.get("compartments") or []
+    cells = {(cell.get("radionuclide"), cell.get("compartment_key")): cell for cell in heatmap.get("cells") or []}
+    cell_width = 155
+    cell_height = 42
+    left = 135
+    top = 78
+    width = left + len(compartments) * cell_width + 40
+    height = top + len(radionuclides) * cell_height + 34
+    image, draw, buffer, _ = _chart_png_buffer(width, height)
+    font = _load_pillow_font(16)
+    small = _load_pillow_font(14)
+    title_font = _load_pillow_font(22, bold=True)
+    draw.text((24, 20), "Mediana da razão calculado / ERICA", fill="#1d252c", font=title_font)
+
+    def color_for(value: Any) -> str:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "#eef2f4"
+        if numeric < 0.5:
+            return "#dceaf3"
+        if numeric < 1:
+            return "#e8f3ee"
+        if numeric < 5:
+            return "#f2d27a"
+        if numeric < 50:
+            return "#df8a4a"
+        return "#b8423a"
+
+    for col, compartment in enumerate(compartments):
+        x = left + col * cell_width
+        draw.text((x + 20, 54), str(compartment.get("label") or ""), fill="#1d252c", font=small)
+    for row_index, radionuclide in enumerate(radionuclides):
+        y = top + row_index * cell_height
+        draw.text((24, y + 10), str(radionuclide), fill="#1d252c", font=font)
+        for col, compartment in enumerate(compartments):
+            x = left + col * cell_width
+            cell = cells.get((radionuclide, compartment.get("key"))) or {}
+            draw.rounded_rectangle((x, y, x + cell_width - 8, y + cell_height - 8), radius=5, fill=color_for(cell.get("median_ratio")))
+            draw.text((x + 44, y + 10), str(cell.get("median_ratio_text") or "—"), fill="#1d252c", font=small)
+    return _finish_png(image, buffer), width, height
+
+
+def _erica_ratio_chart_images(review: dict[str, Any]) -> list[tuple[str, BytesIO, int, int]]:
+    scopes = (review.get("erica_chart_payloads") or {}).get("scope_rows") or []
+    if not scopes:
+        return []
+    images = [
+        ("Gráfico - Boxplot da razão calculado / ERICA", *_erica_ratio_boxplot_png(review)),
+        ("Gráfico - Heatmap da mediana calculado / ERICA", *_erica_ratio_heatmap_png(review)),
+    ]
+    for scope in scopes:
+        images.append((f"Gráfico - Dispersão calculado / ERICA - {scope.get('scope_label') or ''}", *_erica_ratio_scatter_png(scope)))
+    return images
+
+
+def _pdf_toc_rows(summary: dict[str, Any]) -> list[tuple[int, str, str]]:
+    scenario = summary.get("scenario") or {}
+    rows: list[tuple[int, str, str]] = [(1, "1.", "Introdução e escopo")]
+    if scenario.get("total_activity_review"):
+        rows.append((1, "2.", "Metodologia"))
+        for child_index, title in enumerate(
+            [
+                "Fontes e cruzamento",
+                "Seleção temporal e censura",
+                "Fórmulas de concentração",
+                "ERICA Tool",
+                "Estatística descritiva e inferencial",
+            ],
+            start=1,
+        ):
+            rows.append((2, f"2.{child_index}", title))
+        rows.extend(
+            [
+                (1, "3.", "Apresentação dos dados"),
+                (1, "4.", "Concentrações por fórmulas"),
+                (1, "5.", "Calculado x ERICA"),
+                (1, "6.", "Estatística descritiva"),
+                (1, "7.", "Estatística inferencial"),
+                (1, "8.", "Report Level e LLD"),
+                (1, "9.", "Discussão e conclusão"),
+            ]
+        )
+        next_number = 10
+    else:
+        rows.extend(
+            [
+                (1, "2.", "Referências disponíveis"),
+                (1, "3.", "Concentrações calculadas"),
+                (1, "4.", "Comparação com Report Level e LLD"),
+            ]
+        )
+        next_number = 5
+    if scenario.get("empirical_activity_statistics"):
+        rows.append((1, f"{next_number}.", "Dados reais TAR"))
+        next_number += 1
+    if scenario.get("statistical_comparison"):
+        rows.append((1, f"{next_number}.", "Estatística complementar"))
+        next_number += 1
+    if scenario.get("sensitivity"):
+        rows.append((1, f"{next_number}.", "Análise de sensibilidade"))
+        next_number += 1
+    if not scenario.get("total_activity_review"):
+        rows.append((1, f"{next_number}.", "Suficiência estatística"))
+    return rows
+
+
 def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any]) -> None:
     if not empirical:
         return
@@ -496,6 +741,164 @@ def _add_docx_empirical_activity_section(document: Any, empirical: dict[str, Any
         document,
         "empirical_inferential",
         note="O Report Level é referência fixa; a incerteza estatística é estimada a partir das amostras reais calculadas pela fórmula.",
+    )
+
+
+def _add_docx_total_activity_review_section(document: Any, review: dict[str, Any]) -> None:
+    if not review:
+        return
+
+    document.add_heading("Atividades totais com composição completa", level=1)
+    document.add_paragraph(review.get("narrative_text") or "")
+    document.add_paragraph(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in review.get("cards") or []))
+
+    _add_docx_table_intro(document, "total_activity_top15")
+    top_table = document.add_table(rows=1, cols=9)
+    top_table.style = "Table Grid"
+    for index, header in enumerate(["Rank", "Data", "A-TAR", "Amostra", "Grupo", "Status", "Numéricos", "< MDA", "Ausentes"]):
+        top_table.rows[0].cells[index].text = header
+    for item in review.get("top15_rows") or []:
+        cells = top_table.add_row().cells
+        cells[0].text = str(item.get("rank") or "—")
+        cells[1].text = item.get("date", "")
+        cells[2].text = item.get("activity_total_text", "—")
+        cells[3].text = item.get("sample_id") or "—"
+        cells[4].text = item.get("group") or "—"
+        cells[5].text = item.get("status", "—")
+        cells[6].text = str(item.get("numeric_count") or 0)
+        cells[7].text = str(item.get("censored_count") or 0)
+        cells[8].text = str(item.get("missing_count") or 0)
+    _add_docx_table_notes(document, "total_activity_top15", note=review.get("source_note") or "")
+
+    _add_docx_table_intro(document, "total_activity_complete")
+    complete_table = document.add_table(rows=1, cols=7)
+    complete_table.style = "Table Grid"
+    for index, header in enumerate(["Data âncora", "Janela", "Dias", "A-TAR máx.", "Numéricos", "< MDA", "Radionuclídeos"]):
+        complete_table.rows[0].cells[index].text = header
+    for item in review.get("window_rows") or []:
+        cells = complete_table.add_row().cells
+        cells[0].text = item.get("anchor_date", "")
+        cells[1].text = f"{item.get('window_start_date') or '—'} a {item.get('window_end_date') or '—'}"
+        cells[2].text = item.get("window_span_days_text", "—")
+        cells[3].text = item.get("activity_total_text", "—")
+        cells[4].text = str(item.get("numeric_count") or 0)
+        cells[5].text = ", ".join(item.get("censored_radionuclides") or []) or "—"
+        cells[6].text = ", ".join(item.get("covered_radionuclides") or []) or "—"
+    _add_docx_table_notes(document, "total_activity_complete", note=review.get("mda_policy") or "")
+
+    _add_docx_table_intro(document, "total_activity_formulas")
+    formula_table = document.add_table(rows=1, cols=3)
+    formula_table.style = "Table Grid"
+    for index, header in enumerate(["Cálculo", "Símbolo", "Fórmula"]):
+        formula_table.rows[0].cells[index].text = header
+    for item in review.get("formula_rows") or []:
+        cells = formula_table.add_row().cells
+        cells[0].text = item.get("name", "")
+        cells[1].text = item.get("symbol", "")
+        cells[2].text = item.get("formula", "")
+    _add_docx_table_notes(document, "total_activity_formulas")
+
+    _add_docx_table_intro(document, "total_activity_constants")
+    constants_table = document.add_table(rows=1, cols=9)
+    constants_table.style = "Table Grid"
+    for index, header in enumerate(["Radionuclídeo", "Vazão", "λ", "Meia-vida", "Bp peixe", "Bp inv.", "Kd", "Fator sed.", "Tempo"]):
+        constants_table.rows[0].cells[index].text = header
+    for item in review.get("constant_rows") or []:
+        cells = constants_table.add_row().cells
+        cells[0].text = item.get("radionuclide", "")
+        cells[1].text = item.get("scenario_flow_text", "—")
+        cells[2].text = item.get("decay_constant_h_text", "—")
+        cells[3].text = item.get("half_life_h_text", "—")
+        cells[4].text = item.get("bioaccumulation_fish_text", "—")
+        cells[5].text = item.get("bioaccumulation_invertebrate_text", "—")
+        cells[6].text = item.get("kd_sediment_l_kg_text", "—")
+        cells[7].text = item.get("sediment_transfer_factor_text", "—")
+        cells[8].text = item.get("sediment_exposure_time_h_text", "—")
+    _add_docx_table_notes(document, "total_activity_constants")
+
+    _add_docx_table_intro(document, "total_activity_matrix")
+    matrix_table = document.add_table(rows=1, cols=9)
+    matrix_table.style = "Table Grid"
+    for index, header in enumerate(["Data âncora", "Janela", "Radionuclídeo", "Data fonte", "Si", "Ai", "Matriz", "Resultado", "Unidade"]):
+        matrix_table.rows[0].cells[index].text = header
+    for item in review.get("matrix_rows") or []:
+        cells = matrix_table.add_row().cells
+        cells[0].text = item.get("anchor_date", "")
+        cells[1].text = f"{item.get('window_start_date') or '—'} a {item.get('window_end_date') or '—'}"
+        cells[2].text = item.get("radionuclide", "")
+        cells[3].text = item.get("source_date", "")
+        cells[4].text = item.get("fraction_text", "—")
+        cells[5].text = item.get("activity_bq_text", "—")
+        cells[6].text = item.get("compartment", "")
+        cells[7].text = item.get("value_text", "—")
+        cells[8].text = item.get("unit", "")
+    _add_docx_table_notes(
+        document,
+        "total_activity_matrix",
+        note="Radionuclídeos < MDA> não geram resultado por matriz porque não entram como valor numérico no denominador.",
+    )
+
+    _add_docx_table_intro(document, "total_activity_erica")
+    erica_table = document.add_table(rows=1, cols=8)
+    erica_table.style = "Table Grid"
+    for index, header in enumerate(["Data", "Amostra", "Radionuclídeo", "Matriz", "Calculado", "ERICA", "Calc./ERICA", "Origem"]):
+        erica_table.rows[0].cells[index].text = header
+    for item in review.get("erica_pair_rows") or []:
+        cells = erica_table.add_row().cells
+        cells[0].text = item.get("date", "")
+        cells[1].text = item.get("sample_id", "")
+        cells[2].text = item.get("radionuclide", "")
+        cells[3].text = item.get("compartment", "")
+        cells[4].text = item.get("calculated_value_text", "—")
+        cells[5].text = item.get("erica_value_text", "—")
+        cells[6].text = item.get("ratio_text", "—")
+        cells[7].text = item.get("erica_source", "")
+    _add_docx_table_notes(
+        document,
+        "total_activity_erica",
+        note="Valores ERICA com * são gerados de modo reprodutível pelo stat_seed e tornam a inferência exploratória.",
+    )
+
+    _add_docx_table_intro(document, "total_activity_norms")
+    norm_table = document.add_table(rows=1, cols=9)
+    norm_table.style = "Table Grid"
+    for index, header in enumerate(["Data", "Amostra", "Radionuclídeo", "Matriz", "Referência", "Valor", "Ref.", "Razão", "Status"]):
+        norm_table.rows[0].cells[index].text = header
+    for item in review.get("norm_comparison_rows") or []:
+        cells = norm_table.add_row().cells
+        cells[0].text = item.get("date", "")
+        cells[1].text = item.get("sample_id", "")
+        cells[2].text = item.get("radionuclide", "")
+        cells[3].text = item.get("compartment", "")
+        cells[4].text = item.get("reference", "")
+        cells[5].text = item.get("value_text", "—")
+        cells[6].text = item.get("reference_value_text", "—")
+        cells[7].text = item.get("ratio_text", "—")
+        cells[8].text = item.get("status", "—")
+    _add_docx_table_notes(document, "total_activity_norms", note="LLD é referência de detecção e não limite de ação.")
+
+    _add_docx_table_intro(document, "total_activity_inferential")
+    inference_table = document.add_table(rows=1, cols=11)
+    inference_table.style = "Table Grid"
+    for index, header in enumerate(["Comparação", "Escopo", "n", "Referência", "Shapiro", "Teste", "p-value", "Resumo razão", "Ultrap.", "Nº ERICA gerado", "Conclusão"]):
+        inference_table.rows[0].cells[index].text = header
+    for item in review.get("inferential_rows") or []:
+        cells = inference_table.add_row().cells
+        cells[0].text = item.get("comparison_type", "")
+        cells[1].text = item.get("scope", "")
+        cells[2].text = str(item.get("n") or "—")
+        cells[3].text = item.get("reference", "—")
+        cells[4].text = item.get("shapiro_p_text", "—")
+        cells[5].text = item.get("test_label", "—")
+        cells[6].text = item.get("p_value_text", "—")
+        cells[7].text = item.get("median_ratio_text") or item.get("p95_ratio_text") or "—"
+        cells[8].text = item.get("exceedance_rate_text", "—")
+        cells[9].text = item.get("generated_erica_count_text", "0")
+        cells[10].text = item.get("conclusion") or item.get("reason", "")
+    _add_docx_table_notes(
+        document,
+        "total_activity_inferential",
+        note="Comparações com LLD são tratadas como referência de detecção. A coluna 'Nº ERICA gerado' conta pares com valor ERICA reproduzido por stat_seed.",
     )
 
 
@@ -671,7 +1074,7 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
 
     document = Document()
     styles = document.styles
-    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.name = "Times New Roman"
     styles["Normal"].font.size = Pt(10)
 
     scenario = summary["scenario"]
@@ -787,6 +1190,8 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
 
     _add_docx_empirical_activity_section(document, scenario.get("empirical_activity_statistics") or {})
 
+    _add_docx_total_activity_review_section(document, scenario.get("total_activity_review") or {})
+
     _add_docx_statistical_section(document, scenario.get("statistical_comparison") or {})
 
     _add_docx_sensitivity_section(document, scenario.get("sensitivity") or {})
@@ -814,6 +1219,7 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
 def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
     try:
         from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import cm
@@ -826,22 +1232,31 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        leftMargin=1.6 * cm,
-        rightMargin=1.6 * cm,
-        topMargin=1.4 * cm,
-        bottomMargin=1.4 * cm,
+        leftMargin=3.0 * cm,
+        rightMargin=2.0 * cm,
+        topMargin=3.0 * cm,
+        bottomMargin=2.0 * cm,
     )
     styles = getSampleStyleSheet()
-    body_style = ParagraphStyle("TarBody", parent=styles["BodyText"], fontName="Helvetica", fontSize=9, leading=12)
-    note_style = ParagraphStyle("TarNote", parent=body_style, fontSize=8, textColor=colors.HexColor("#607782"), leading=10)
-    heading_style = ParagraphStyle("TarHeading", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=15, spaceAfter=8)
-    subheading_style = ParagraphStyle("TarSubheading", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, spaceBefore=12, spaceAfter=6)
-    caption_style = ParagraphStyle("TarTableCaption", parent=body_style, fontName="Helvetica-Bold", textColor=colors.HexColor("#203f49"), spaceBefore=4, spaceAfter=4)
+    body_style = ParagraphStyle("TarBody", parent=styles["BodyText"], fontName="Times-Roman", fontSize=11, leading=16, alignment=TA_JUSTIFY)
+    note_style = ParagraphStyle("TarNote", parent=body_style, fontSize=9, textColor=colors.HexColor("#607782"), leading=12, alignment=TA_JUSTIFY)
+    heading_style = ParagraphStyle("TarHeading", parent=styles["Heading1"], fontName="Times-Bold", fontSize=15, leading=19, spaceAfter=8)
+    cover_title_style = ParagraphStyle("TarCoverTitle", parent=heading_style, fontSize=16, leading=23, alignment=TA_CENTER, spaceAfter=16)
+    subheading_style = ParagraphStyle("TarSubheading", parent=styles["Heading2"], fontName="Times-Bold", fontSize=12, leading=15, spaceBefore=12, spaceAfter=6)
+    caption_style = ParagraphStyle("TarTableCaption", parent=body_style, fontName="Times-Bold", textColor=colors.HexColor("#203f49"), spaceBefore=4, spaceAfter=4, alignment=TA_CENTER)
+    toc_style = ParagraphStyle("TarToc", parent=body_style, fontName="Times-Roman", fontSize=10.5, leading=14, alignment=0)
+    toc_child_style = ParagraphStyle("TarTocChild", parent=toc_style, leftIndent=18)
     story: list[Any] = [
+        Paragraph(_pdf_text(REPORT_FULL_TITLE.upper()), cover_title_style),
         Paragraph("Relatório TAR", heading_style),
         Paragraph(_summary_paragraph(summary), body_style),
         Spacer(1, 8),
+        Paragraph("Sumário", subheading_style),
     ]
+    for level, number, title in _pdf_toc_rows(summary):
+        style = toc_child_style if level > 1 else toc_style
+        story.append(Paragraph(f"{number} {_pdf_text(title)}", style))
+    story.append(Spacer(1, 10))
 
     def apply_table_style(table: Any, *, font_size: float = 7) -> Any:
         table.setStyle(
@@ -849,7 +1264,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), font_size),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -858,81 +1274,37 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         return table
 
     scenario = summary["scenario"]
-
-    story.append(Paragraph("Referências disponíveis", subheading_style))
-    _append_pdf_table_intro(story, "reference_counts", body_style, caption_style)
-    reference_count_rows = [["Compartimento", "Report Level", "LLD", "Radionuclídeos com referência"]]
-    for compartment in COMPARTMENTS:
-        count = scenario["reference_counts"][compartment["key"]]
-        reference_count_rows.append(
+    total_review_for_method = scenario.get("total_activity_review") or {}
+    story.extend(
+        [
+            Paragraph("Introdução e escopo", subheading_style),
+            Paragraph(_summary_paragraph(summary), body_style),
+            Spacer(1, 8),
+        ]
+    )
+    if total_review_for_method:
+        source_text = (
+            f"As fontes usadas são: A-TAR em {total_review_for_method.get('source_total_workbook_path') or ''}, "
+            f"aba {total_review_for_method.get('source_total_sheet') or ''}; composição radionuclídica em "
+            f"{total_review_for_method.get('source_radionuclide_workbook_path') or ''}, "
+            f"aba {total_review_for_method.get('source_radionuclide_sheet') or ''}; e constantes/fatores da planilha TAR no cenário selecionado."
+        )
+        story.extend(
             [
-                count["label"],
-                str(count["report_level"]),
-                str(count["lld"]),
-                ", ".join(count["report_level_radionuclides"]) or "sem referência",
+                Paragraph("Metodologia", subheading_style),
+                Paragraph("Fontes e cruzamento", caption_style),
+                Paragraph(_pdf_text("O relatório cruza a atividade total do tanque com a composição radionuclídica disponível para datas equivalentes ou próximas. " + source_text), body_style),
+                Paragraph("Seleção temporal e censura", caption_style),
+                Paragraph("A análise audita as maiores atividades totais do tanque e seleciona janelas mínimas que concentrem pelo menos oito radionuclídeos diferentes na data mais próxima possível. Entradas < MDA> contam como informação censurada para completude, mas não entram como valor numérico no denominador das frações.", body_style),
+                Paragraph("Fórmulas de concentração", caption_style),
+                Paragraph("Para cada linha selecionada, calcula-se Si, Ai, concentração na água pela vazão do cenário e incorporações em peixes, invertebrados e sedimento pelos fatores registrados na planilha TAR.", body_style),
+                Paragraph("ERICA Tool", caption_style),
+                Paragraph("Os valores calculados por fórmula são pareados com valores do ERICA Tool quando disponíveis. Pares ausentes recebem valores reprodutíveis por stat_seed, marcados com asterisco, para leitura exploratória.", body_style),
+                Paragraph("Estatística descritiva e inferencial", caption_style),
+                Paragraph("A estatística descritiva resume médias, medianas, P95 e gráficos da razão calculado/ERICA. A inferência usa log(calculado/ERICA) e log(valor/referência), com Shapiro-Wilk e teste t ou Wilcoxon conforme normalidade.", body_style),
+                Spacer(1, 8),
             ]
         )
-    reference_count_table = apply_table_style(
-        Table(reference_count_rows, colWidths=[3.0 * cm, 2.4 * cm, 2.0 * cm, 8.6 * cm], repeatRows=1),
-        font_size=7,
-    )
-    story.append(reference_count_table)
-    _append_pdf_table_notes(story, "reference_counts", note_style, note=REPORT_LEVEL_NOTE)
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Concentrações calculadas", subheading_style))
-    _append_pdf_table_intro(story, "concentrations", body_style, caption_style)
-    concentration_rows = [["Radionuclídeo", *[f"{comp['label']} ({comp['unit']})" for comp in COMPARTMENTS]]]
-    for item in scenario["rows"]:
-        concentration_rows.append(
-            [
-                item["radionuclide"],
-                *[item["compartments"][compartment["key"]]["value_text"] for compartment in COMPARTMENTS],
-            ]
-        )
-    concentration_table = apply_table_style(
-        Table(concentration_rows, colWidths=[2.2 * cm, 3.3 * cm, 3.3 * cm, 3.4 * cm, 3.3 * cm], repeatRows=1),
-        font_size=6.3,
-    )
-    story.append(concentration_table)
-    _append_pdf_table_notes(
-        story,
-        "concentrations",
-        note_style,
-        note=HYPOTHETICAL_N_NOTE if scenario.get("is_hypothetical") else DETERMINISTIC_N_NOTE,
-    )
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Comparação com Report Level e LLD", subheading_style))
-    _append_pdf_table_intro(story, "reference_results", body_style, caption_style)
-    reference_rows = [["Radionuclídeo", "Compart.", "Concentração", "Report Level", "Razão RL", "Status RL", "LLD", "Razão LLD", "Status LLD"]]
-    for item in scenario["rows"]:
-        for compartment in COMPARTMENTS:
-            data = item["compartments"][compartment["key"]]
-            reference_rows.append(
-                [
-                    item["radionuclide"],
-                    compartment["label"],
-                    data["value_text"],
-                    data["report_level_text"],
-                    data["report_level_ratio_text"],
-                    data["report_level_status"],
-                    data["lld_text"],
-                    data["lld_ratio_text"],
-                    data["lld_status"],
-                ]
-            )
-    reference_table = apply_table_style(
-        Table(
-            reference_rows,
-            colWidths=[1.6 * cm, 1.7 * cm, 2.0 * cm, 2.0 * cm, 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.5 * cm, 1.5 * cm],
-            repeatRows=1,
-        ),
-        font_size=4.8,
-    )
-    story.append(reference_table)
-    _append_pdf_table_notes(story, "reference_results", note_style, note=REPORT_LEVEL_NOTE)
-    story.append(Spacer(1, 8))
 
     if scenario.get("is_hypothetical"):
         story.append(Paragraph("Medições sintéticas da água do TAR", subheading_style))
@@ -991,7 +1363,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 7),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1032,7 +1405,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 6.7),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1070,7 +1444,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 5.8),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1113,7 +1488,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 5.2),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1162,6 +1538,233 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             note_style,
             note="O Report Level é referência fixa; a incerteza estatística é estimada a partir das amostras reais calculadas pela fórmula.",
         )
+        story.append(Spacer(1, 8))
+
+    total_review = scenario.get("total_activity_review") or {}
+    if total_review:
+        story.extend(
+            [
+                Paragraph("Apresentação dos dados", subheading_style),
+                Paragraph(_pdf_text(total_review.get("narrative_text") or ""), body_style),
+                Paragraph(
+                    _pdf_text(" | ".join(f"{card.get('label')}: {card.get('value')}" for card in total_review.get("cards") or [])),
+                    body_style,
+                ),
+                Spacer(1, 8),
+            ]
+        )
+
+        _append_pdf_table_intro(story, "total_activity_top15", body_style, caption_style)
+        top_rows = [["Rank", "Data", "A-TAR", "Amostra", "Grupo", "Status", "Num.", "< MDA", "Aus."]]
+        for item in total_review.get("top15_rows") or []:
+            top_rows.append(
+                [
+                    str(item.get("rank") or "—"),
+                    item.get("date", ""),
+                    item.get("activity_total_text", "—"),
+                    item.get("sample_id") or "—",
+                    item.get("group") or "—",
+                    item.get("status", "—"),
+                    str(item.get("numeric_count") or 0),
+                    str(item.get("censored_count") or 0),
+                    str(item.get("missing_count") or 0),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(top_rows, colWidths=[0.8 * cm, 1.7 * cm, 1.8 * cm, 1.8 * cm, 2.0 * cm, 2.3 * cm, 0.8 * cm, 0.9 * cm, 0.8 * cm], repeatRows=1),
+                font_size=5.2,
+            )
+        )
+        _append_pdf_table_notes(story, "total_activity_top15", note_style, note=total_review.get("source_note") or "")
+        story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "total_activity_complete", body_style, caption_style)
+        complete_rows = [["Data", "Janela", "Dias", "A-TAR", "Num.", "< MDA", "Radionuclídeos"]]
+        for item in total_review.get("window_rows") or []:
+            complete_rows.append(
+                [
+                    item.get("anchor_date", ""),
+                    f"{item.get('window_start_date') or '—'} a {item.get('window_end_date') or '—'}",
+                    item.get("window_span_days_text", "—"),
+                    item.get("activity_total_text", "—"),
+                    str(item.get("numeric_count") or 0),
+                    ", ".join(item.get("censored_radionuclides") or []) or "—",
+                    ", ".join(item.get("covered_radionuclides") or []) or "—",
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(complete_rows, colWidths=[1.5 * cm, 2.8 * cm, 0.8 * cm, 1.4 * cm, 0.8 * cm, 1.5 * cm, 4.2 * cm], repeatRows=1),
+                font_size=4.8,
+            )
+        )
+        _append_pdf_table_notes(story, "total_activity_complete", note_style, note=total_review.get("mda_policy") or "")
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Concentrações por fórmulas", subheading_style))
+        _append_pdf_table_intro(story, "total_activity_formulas", body_style, caption_style)
+        formula_rows = [["Cálculo", "Símbolo", "Fórmula"]]
+        for item in total_review.get("formula_rows") or []:
+            formula_rows.append([item.get("name", ""), item.get("symbol", ""), item.get("formula", "")])
+        story.append(apply_table_style(Table(formula_rows, colWidths=[4.0 * cm, 2.0 * cm, 9.5 * cm], repeatRows=1), font_size=6.2))
+        _append_pdf_table_notes(story, "total_activity_formulas", note_style)
+        story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "total_activity_constants", body_style, caption_style)
+        constant_rows = [["Rad.", "Vazão", "λ", "Meia-vida", "Bp peixe", "Bp inv.", "Kd", "Fator sed.", "Tempo"]]
+        for item in total_review.get("constant_rows") or []:
+            constant_rows.append(
+                [
+                    item.get("radionuclide", ""),
+                    item.get("scenario_flow_text", "—"),
+                    item.get("decay_constant_h_text", "—"),
+                    item.get("half_life_h_text", "—"),
+                    item.get("bioaccumulation_fish_text", "—"),
+                    item.get("bioaccumulation_invertebrate_text", "—"),
+                    item.get("kd_sediment_l_kg_text", "—"),
+                    item.get("sediment_transfer_factor_text", "—"),
+                    item.get("sediment_exposure_time_h_text", "—"),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(constant_rows, colWidths=[1.1 * cm, 1.7 * cm, 1.5 * cm, 1.6 * cm, 1.4 * cm, 1.4 * cm, 1.6 * cm, 1.5 * cm, 1.7 * cm], repeatRows=1),
+                font_size=4.8,
+            )
+        )
+        _append_pdf_table_notes(story, "total_activity_constants", note_style)
+        story.append(Spacer(1, 8))
+
+        _append_pdf_table_intro(story, "total_activity_matrix", body_style, caption_style)
+        matrix_rows = [["Data", "Janela", "Rad.", "Fonte", "Si", "Ai", "Matriz", "Resultado", "Un."]]
+        for item in total_review.get("matrix_rows") or []:
+            matrix_rows.append(
+                [
+                    item.get("anchor_date", ""),
+                    f"{item.get('window_start_date') or '—'} a {item.get('window_end_date') or '—'}",
+                    item.get("radionuclide", ""),
+                    item.get("source_date", ""),
+                    item.get("fraction_text", "—"),
+                    item.get("activity_bq_text", "—"),
+                    item.get("compartment", ""),
+                    item.get("value_text", "—"),
+                    item.get("unit", ""),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(matrix_rows, colWidths=[1.2 * cm, 2.4 * cm, 0.9 * cm, 1.2 * cm, 0.9 * cm, 1.3 * cm, 1.3 * cm, 1.3 * cm, 1.0 * cm], repeatRows=1),
+                font_size=3.8,
+            )
+        )
+        _append_pdf_table_notes(
+            story,
+            "total_activity_matrix",
+            note_style,
+            note="Radionuclídeos < MDA> não geram resultado por matriz porque não entram como valor numérico no denominador.",
+        )
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Calculado x ERICA", subheading_style))
+        _append_pdf_table_intro(story, "total_activity_erica", body_style, caption_style)
+        erica_rows = [["Data", "Amostra", "Rad.", "Matriz", "Calculado", "ERICA", "Calc./ERICA", "Origem"]]
+        for item in total_review.get("erica_pair_rows") or []:
+            erica_rows.append(
+                [
+                    item.get("date", ""),
+                    item.get("sample_id", ""),
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    item.get("calculated_value_text", "—"),
+                    item.get("erica_value_text", "—"),
+                    item.get("ratio_text", "—"),
+                    item.get("erica_source", ""),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(erica_rows, colWidths=[1.35 * cm, 1.5 * cm, 1.0 * cm, 1.4 * cm, 1.5 * cm, 1.5 * cm, 1.3 * cm, 2.6 * cm], repeatRows=1),
+                font_size=4.2,
+            )
+        )
+        _append_pdf_table_notes(
+            story,
+            "total_activity_erica",
+            note_style,
+            note="Valores ERICA com * são gerados de modo reprodutível pelo stat_seed e tornam a inferência exploratória.",
+        )
+        story.append(Spacer(1, 8))
+
+        story.extend(
+            [
+                Paragraph("Estatística descritiva", subheading_style),
+                Paragraph(ERICA_RATIO_CHART_EXPLANATION, body_style),
+            ]
+        )
+        for title, image_buffer, width, height in _erica_ratio_chart_images(total_review):
+            image_width = min(document.width, 16.0 * cm)
+            story.append(Paragraph(_pdf_text(title), caption_style))
+            story.append(RLImage(image_buffer, width=image_width, height=image_width * (height / width)))
+            story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Estatística inferencial", subheading_style))
+        _append_pdf_table_intro(story, "total_activity_inferential", body_style, caption_style)
+        inference_rows = [["Comparação", "Escopo", "n", "Ref.", "Shapiro", "Teste", "p-value", "Resumo", "Ultrap.", "Nº ERICA gerado", "Conclusão"]]
+        for item in total_review.get("inferential_rows") or []:
+            inference_rows.append(
+                [
+                    item.get("comparison_type", ""),
+                    item.get("scope", ""),
+                    str(item.get("n") or "—"),
+                    item.get("reference", "—"),
+                    item.get("shapiro_p_text", "—"),
+                    item.get("test_label", "—"),
+                    item.get("p_value_text", "—"),
+                    item.get("median_ratio_text") or item.get("p95_ratio_text") or "—",
+                    item.get("exceedance_rate_text", "—"),
+                    item.get("generated_erica_count_text", "0"),
+                    item.get("conclusion") or item.get("reason", ""),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(inference_rows, colWidths=[1.7 * cm, 2.3 * cm, 0.6 * cm, 1.2 * cm, 1.0 * cm, 1.7 * cm, 1.0 * cm, 1.1 * cm, 1.0 * cm, 0.8 * cm, 2.5 * cm], repeatRows=1),
+                font_size=3.5,
+            )
+        )
+        _append_pdf_table_notes(
+            story,
+            "total_activity_inferential",
+            note_style,
+            note="Comparações com LLD são tratadas como referência de detecção. A coluna 'Nº ERICA gerado' conta pares com valor ERICA reproduzido por stat_seed.",
+        )
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Report Level e LLD", subheading_style))
+        _append_pdf_table_intro(story, "total_activity_norms", body_style, caption_style)
+        norm_rows = [["Data", "Amostra", "Rad.", "Matriz", "Ref.", "Valor", "Ref. valor", "Razão", "Status"]]
+        for item in total_review.get("norm_comparison_rows") or []:
+            norm_rows.append(
+                [
+                    item.get("date", ""),
+                    item.get("sample_id", ""),
+                    item.get("radionuclide", ""),
+                    item.get("compartment", ""),
+                    item.get("reference", ""),
+                    item.get("value_text", "—"),
+                    item.get("reference_value_text", "—"),
+                    item.get("ratio_text", "—"),
+                    item.get("status", "—"),
+                ]
+            )
+        story.append(
+            apply_table_style(
+                Table(norm_rows, colWidths=[1.25 * cm, 1.45 * cm, 1.0 * cm, 1.35 * cm, 1.2 * cm, 1.4 * cm, 1.4 * cm, 1.0 * cm, 1.2 * cm], repeatRows=1),
+                font_size=4.0,
+            )
+        )
+        _append_pdf_table_notes(story, "total_activity_norms", note_style, note="LLD é referência de detecção e não limite de ação.")
         story.append(Spacer(1, 8))
 
     statistical = scenario.get("statistical_comparison") or {}
@@ -1299,7 +1902,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 6.5),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1310,7 +1914,7 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         story.append(Spacer(1, 8))
 
         for title, image_buffer, width, height in _sensitivity_chart_images(sensitivity):
-            image_width = 16.4 * cm
+            image_width = min(document.width, 16.0 * cm)
             story.append(Paragraph(CHART_EXPLANATIONS.get(title, ""), body_style))
             story.append(Paragraph(title, caption_style))
             story.append(RLImage(image_buffer, width=image_width, height=image_width * (height / width)))
@@ -1332,7 +1936,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 7),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1376,7 +1981,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                     ("FONTSIZE", (0, 0), (-1, -1), 5.8),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]
@@ -1397,7 +2003,7 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
 
     story.extend(
         [
-            Paragraph("Suficiência estatística", subheading_style),
+            Paragraph("Discussão e conclusão", subheading_style),
             Paragraph(summary["inferential_assessment"]["reason"], body_style),
             Spacer(1, 8),
         ]
@@ -1413,8 +2019,8 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf1f3")),
                 ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d7dc")),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Times-Roman"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]

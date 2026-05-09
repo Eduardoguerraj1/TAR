@@ -45,6 +45,10 @@ TAR_ACTIVITY_WORKBOOK_PATH = resolve_config_path(
     "TAR_ACTIVITY_WORKBOOK_PATH",
     BASE_DIR / "Atividade Total TAR c radionuclideos.xls",
 )
+TAR_TOTAL_ACTIVITY_WORKBOOK_PATH = resolve_config_path(
+    "TAR_TOTAL_ACTIVITY_WORKBOOK_PATH",
+    BASE_DIR / "Dados Atividade TAR - Jayme (1).xlsx",
+)
 TAR_ARTICLE_PATH = resolve_config_path("TAR_ARTICLE_PATH", BASE_DIR / "Artigo TAR1 correção.pdf")
 
 
@@ -53,6 +57,7 @@ def current_tar_summary() -> dict[str, Any]:
         TAR_WORKBOOK_PATH,
         request.args.get("scenario", "a1"),
         activity_workbook_path=TAR_ACTIVITY_WORKBOOK_PATH,
+        total_activity_workbook_path=TAR_TOTAL_ACTIVITY_WORKBOOK_PATH,
         hypothetical_n=request.args.get("n", 60),
         hypothetical_seed=request.args.get("seed", 20260504),
         sensitivity_n=request.args.get("sensitivity_n", 10000),
@@ -71,6 +76,7 @@ def tar_error_response(exc: Exception, *, as_json: bool = False):
                 "error": message,
                 "workbook_path": str(TAR_WORKBOOK_PATH),
                 "activity_workbook_path": str(TAR_ACTIVITY_WORKBOOK_PATH),
+                "total_activity_workbook_path": str(TAR_TOTAL_ACTIVITY_WORKBOOK_PATH),
             }
         ), 500
     return Response(message, status=500, content_type="text/plain; charset=utf-8")
@@ -89,6 +95,7 @@ def healthz():
             "service": "tar-beta",
             "workbook_path": str(TAR_WORKBOOK_PATH),
             "activity_workbook_path": str(TAR_ACTIVITY_WORKBOOK_PATH),
+            "total_activity_workbook_path": str(TAR_TOTAL_ACTIVITY_WORKBOOK_PATH),
             "article_path": str(TAR_ARTICLE_PATH),
         }
     )

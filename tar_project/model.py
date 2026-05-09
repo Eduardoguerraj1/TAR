@@ -4,6 +4,7 @@ import math
 import random
 import re
 import statistics
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,11 @@ EMPIRICAL_ACTIVITY_RADIONUCLIDES = ["Co-58", "Co-60", "Cr-51", "Cs-137", "Mn-54"
 EMPIRICAL_ACTIVITY_GROUPS = ["TAR - Afluente", "TAR - Efluente"]
 EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS = ["TAR - Afluente"]
 EMPIRICAL_ACTIVITY_DEFAULT_FILENAME = "Atividade Total TAR c radionuclideos.xls"
+TOTAL_ACTIVITY_DEFAULT_FILENAME = "Dados Atividade TAR - Jayme (1).xlsx"
+TOTAL_ACTIVITY_REVIEW_TOP_N = 15
+TOTAL_ACTIVITY_WINDOW_TARGET_RADIONUCLIDES = 8
+SEDIMENT_TRANSFER_FACTOR = 0.000072
+SEDIMENT_EXPOSURE_TIME_H = 262980.0
 
 COMPARTMENTS: list[dict[str, Any]] = [
     {
@@ -212,7 +218,25 @@ def _read_radionuclide_rows(ws: Any) -> list[dict[str, Any]]:
             "source_concentration_bq_m3": _to_float(ws.cell(row_index, 3).value),
             "fraction": _to_float(ws.cell(row_index, 4).value),
             "activity_bq": _to_float(ws.cell(row_index, 5).value),
+            "constants": {},
             "compartments": {},
+        }
+        decay_constant_h = _to_float(ws.cell(row_index, 8).value)
+        item["constants"] = {
+            "decay_constant_h": decay_constant_h,
+            "decay_constant_h_text": _format_scientific(decay_constant_h),
+            "half_life_h": (0.693 / decay_constant_h) if decay_constant_h not in (None, 0) else None,
+            "half_life_h_text": _format_scientific((0.693 / decay_constant_h) if decay_constant_h not in (None, 0) else None),
+            "bioaccumulation_fish": _to_float(ws.cell(row_index, 9).value),
+            "bioaccumulation_fish_text": _format_decimal(_to_float(ws.cell(row_index, 9).value)),
+            "bioaccumulation_invertebrate": _to_float(ws.cell(row_index, 10).value),
+            "bioaccumulation_invertebrate_text": _format_decimal(_to_float(ws.cell(row_index, 10).value)),
+            "kd_sediment_l_kg": _to_float(ws.cell(row_index, 11).value),
+            "kd_sediment_l_kg_text": _format_scientific(_to_float(ws.cell(row_index, 11).value)),
+            "sediment_transfer_factor": SEDIMENT_TRANSFER_FACTOR,
+            "sediment_transfer_factor_text": _format_scientific(SEDIMENT_TRANSFER_FACTOR),
+            "sediment_exposure_time_h": SEDIMENT_EXPOSURE_TIME_H,
+            "sediment_exposure_time_h_text": _format_scientific(SEDIMENT_EXPOSURE_TIME_H),
         }
         for compartment in COMPARTMENTS:
             value = _to_float(ws.cell(row_index, compartment["value_col"]).value)
@@ -657,6 +681,22 @@ def _stats_summary_with_text(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _ratio_summary_with_text(values: list[float]) -> dict[str, Any]:
+    summary = _summary_stats(values)
+    return {
+        **summary,
+        "mean_text": _format_decimal(summary["mean"]),
+        "stdev_text": _format_decimal(summary["stdev"]),
+        "cv_text": _format_percent(summary["cv"]),
+        "q1_text": _format_decimal(summary["q1"]),
+        "median_text": _format_decimal(summary["median"]),
+        "q3_text": _format_decimal(summary["q3"]),
+        "p95_text": _format_decimal(summary["p95"]),
+        "min_text": _format_decimal(summary["min"]),
+        "max_text": _format_decimal(summary["max"]),
+    }
+
+
 def _is_mda_marker(value: Any) -> bool:
     return isinstance(value, str) and "MDA" in value.upper()
 
@@ -679,6 +719,12 @@ def _empirical_activity_path(workbook_path: str | Path, activity_workbook_path: 
     if activity_workbook_path is not None:
         return Path(activity_workbook_path)
     return Path(workbook_path).resolve().parent / EMPIRICAL_ACTIVITY_DEFAULT_FILENAME
+
+
+def _total_activity_path(workbook_path: str | Path, total_activity_workbook_path: str | Path | None) -> Path:
+    if total_activity_workbook_path is not None:
+        return Path(total_activity_workbook_path)
+    return Path(workbook_path).resolve().parent / TOTAL_ACTIVITY_DEFAULT_FILENAME
 
 
 def _load_empirical_activity_records(path: str | Path) -> dict[str, Any]:
@@ -1162,6 +1208,845 @@ def _build_empirical_activity_statistics(
     }
 
 
+def _date_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "date") and callable(value.date):
+        return value.date().isoformat()
+    if hasattr(value, "isoformat") and callable(value.isoformat):
+        return value.isoformat()
+    return _raw_text(value)
+
+
+def _activity_matches(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return False
+    return math.isclose(float(left), float(right), rel_tol=1e-12, abs_tol=1.0)
+
+
+def _load_total_activity_records(path: str | Path) -> dict[str, Any]:
+    total_path = Path(path)
+    if not total_path.exists():
+        raise TarWorkbookError(f"Planilha de atividade total do tanque não encontrada: {total_path}")
+    try:
+        workbook = openpyxl.load_workbook(total_path, data_only=True, read_only=True)
+    except Exception as exc:
+        raise TarWorkbookError(f"Não foi possível abrir a planilha de atividade total do tanque: {exc}") from exc
+    try:
+        if not workbook.sheetnames:
+            raise TarWorkbookError("A planilha de atividade total do tanque não contém abas.")
+        ws = workbook[workbook.sheetnames[0]]
+        records: list[dict[str, Any]] = []
+        for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            date_value = row[0] if len(row) > 0 else None
+            activity_value = _to_float(row[1] if len(row) > 1 else None)
+            date_value_text = _date_text(date_value)
+            if not date_value_text or activity_value is None:
+                continue
+            records.append(
+                {
+                    "row": row_index,
+                    "date": date_value_text,
+                    "activity_total_bq": activity_value,
+                    "activity_total_text": _format_scientific(activity_value),
+                }
+            )
+        return {
+            "path": str(total_path),
+            "sheet": ws.title,
+            "records": records,
+        }
+    finally:
+        workbook.close()
+
+
+def _radionuclide_completeness(record: dict[str, Any] | None) -> dict[str, Any]:
+    radionuclides = (record or {}).get("radionuclides") or {}
+    numeric: list[str] = []
+    censored: list[str] = []
+    missing: list[str] = []
+    for radionuclide in EMPIRICAL_ACTIVITY_RADIONUCLIDES:
+        data = radionuclides.get(radionuclide) or {}
+        if data.get("value") is not None:
+            numeric.append(radionuclide)
+        elif data.get("censored"):
+            censored.append(radionuclide)
+        else:
+            missing.append(radionuclide)
+    filled = len(numeric) + len(censored)
+    complete = filled == len(EMPIRICAL_ACTIVITY_RADIONUCLIDES)
+    return {
+        "complete": complete,
+        "numeric_count": len(numeric),
+        "censored_count": len(censored),
+        "missing_count": len(missing),
+        "filled_count": filled,
+        "numeric_radionuclides": numeric,
+        "censored_radionuclides": censored,
+        "missing_radionuclides": missing,
+        "status": "completo" if complete else "incompleto",
+    }
+
+
+def _match_total_activity_record(total_record: dict[str, Any], detail_records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    matches = [
+        record
+        for record in detail_records
+        if record.get("date") == total_record.get("date")
+        and _activity_matches(record.get("activity_total_bq"), total_record.get("activity_total_bq"))
+    ]
+    if not matches:
+        return None
+    return next((record for record in matches if record.get("group") in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS), matches[0])
+
+
+def _total_activity_joined_row(rank: int | None, total_record: dict[str, Any], matched: dict[str, Any] | None) -> dict[str, Any]:
+    completeness = _radionuclide_completeness(matched)
+    if not matched:
+        status = "sem correspondência"
+    elif completeness["complete"]:
+        status = "completo"
+    else:
+        status = "sem composição completa"
+    return {
+        "rank": rank,
+        "source_row": total_record.get("row"),
+        "date": total_record.get("date"),
+        "activity_total_bq": total_record.get("activity_total_bq"),
+        "activity_total_text": total_record.get("activity_total_text"),
+        "matched": bool(matched),
+        "detail_row": matched.get("row") if matched else None,
+        "sample_id": matched.get("sample_id") if matched else "",
+        "group": matched.get("group") if matched else "",
+        "complete": bool(matched) and completeness["complete"],
+        **completeness,
+        "status": status,
+    }
+
+
+def _complete_total_activity_rows(
+    total_records: list[dict[str, Any]],
+    detail_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for total_record in sorted(total_records, key=lambda item: item["activity_total_bq"], reverse=True):
+        matched = _match_total_activity_record(total_record, detail_records)
+        joined = _total_activity_joined_row(None, total_record, matched)
+        if joined["complete"]:
+            rows.append(joined)
+    return rows
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _group_total_activity_by_date(total_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in total_records:
+        grouped.setdefault(str(record.get("date") or ""), []).append(record)
+
+    rows: list[dict[str, Any]] = []
+    for date_text, records in grouped.items():
+        parsed = _parse_iso_date(date_text)
+        activity_values = [
+            float(record["activity_total_bq"])
+            for record in records
+            if record.get("activity_total_bq") is not None
+        ]
+        if parsed is None or not activity_values:
+            continue
+        rows.append(
+            {
+                "date": date_text,
+                "date_value": parsed,
+                "source_rows": [record.get("row") for record in records],
+                "activity_row_count": len(records),
+                "activity_total_bq": max(activity_values),
+                "activity_total_text": _format_scientific(max(activity_values)),
+                "activity_total_min_bq": min(activity_values),
+                "activity_total_min_text": _format_scientific(min(activity_values)),
+                "activity_total_values": activity_values,
+            }
+        )
+    return sorted(rows, key=lambda item: item["date_value"])
+
+
+def _detail_records_by_date(detail_records: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
+    grouped: dict[date, list[dict[str, Any]]] = {}
+    for record in detail_records:
+        if record.get("group") not in EMPIRICAL_ACTIVITY_ANALYSIS_GROUPS:
+            continue
+        parsed = _parse_iso_date(record.get("date"))
+        if parsed is None:
+            continue
+        grouped.setdefault(parsed, []).append(record)
+    return grouped
+
+
+def _record_radionuclide_status(record: dict[str, Any], radionuclide: str) -> str:
+    data = (record.get("radionuclides") or {}).get(radionuclide) or {}
+    if data.get("value") is not None:
+        return "numérico"
+    if data.get("censored"):
+        return "censurado"
+    return "ausente"
+
+
+def _date_radionuclide_set(records: list[dict[str, Any]], radionuclides: list[str]) -> set[str]:
+    found: set[str] = set()
+    for record in records:
+        for radionuclide in radionuclides:
+            if _record_radionuclide_status(record, radionuclide) in {"numérico", "censurado"}:
+                found.add(radionuclide)
+    return found
+
+
+def _window_records(
+    grouped_detail: dict[date, list[dict[str, Any]]],
+    start_date: date,
+    end_date: date,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for current_date in sorted(grouped_detail):
+        if start_date <= current_date <= end_date:
+            rows.extend(grouped_detail[current_date])
+    return rows
+
+
+def _minimum_radionuclide_window(
+    anchor_date: date,
+    grouped_detail: dict[date, list[dict[str, Any]]],
+    target_radionuclides: list[str],
+) -> dict[str, Any] | None:
+    dates = sorted(grouped_detail)
+    if not dates:
+        return None
+
+    best: dict[str, Any] | None = None
+    for start_index, start_date in enumerate(dates):
+        if start_date > anchor_date:
+            break
+        found: set[str] = set()
+        row_count = 0
+        for end_date in dates[start_index:]:
+            for record in grouped_detail[end_date]:
+                row_count += 1
+                for radionuclide in target_radionuclides:
+                    if _record_radionuclide_status(record, radionuclide) in {"numérico", "censurado"}:
+                        found.add(radionuclide)
+            if end_date < anchor_date:
+                continue
+            if len(found) < TOTAL_ACTIVITY_WINDOW_TARGET_RADIONUCLIDES:
+                continue
+            span_days = (end_date - start_date).days
+            center = start_date.toordinal() + span_days / 2.0
+            center_distance = abs(anchor_date.toordinal() - center)
+            score = (span_days, center_distance, row_count, start_date, end_date)
+            if best is None or score < best["score"]:
+                best = {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "span_days": span_days,
+                    "radionuclides": sorted(found),
+                    "row_count": row_count,
+                    "score": score,
+                }
+            break
+    if best is None:
+        return None
+    best["records"] = _window_records(grouped_detail, best["start_date"], best["end_date"])
+    best["radionuclides"] = sorted(_date_radionuclide_set(best["records"], target_radionuclides))
+    best["row_count"] = len(best["records"])
+    return best
+
+
+def _select_window_radionuclides(
+    window_records: list[dict[str, Any]],
+    anchor_date: date,
+    target_radionuclides: list[str],
+) -> dict[str, dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for radionuclide in target_radionuclides:
+        candidates: list[tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], str, date]] = []
+        for record in window_records:
+            source_date = _parse_iso_date(record.get("date"))
+            if source_date is None:
+                continue
+            data = (record.get("radionuclides") or {}).get(radionuclide) or {}
+            status = _record_radionuclide_status(record, radionuclide)
+            if status == "ausente":
+                continue
+            day_distance = abs((source_date - anchor_date).days)
+            numeric_priority = 0 if status == "numérico" else 1
+            activity_priority = -(float(record.get("activity_total_bq") or 0.0))
+            score = (numeric_priority, day_distance, activity_priority, int(record.get("row") or 0))
+            candidates.append((score, record, data, status, source_date))
+        if not candidates:
+            selected[radionuclide] = {
+                "radionuclide": radionuclide,
+                "status": "ausente",
+                "value": None,
+                "value_text": "—",
+                "source_date": "",
+                "source_sample_id": "",
+                "day_offset": None,
+                "day_offset_text": "—",
+            }
+            continue
+        _score, record, data, status, source_date = sorted(candidates, key=lambda item: item[0])[0]
+        day_offset = (source_date - anchor_date).days
+        selected[radionuclide] = {
+            "radionuclide": radionuclide,
+            "status": status,
+            "value": data.get("value"),
+            "value_text": _format_scientific(data.get("value")) if data.get("value") is not None else data.get("raw_text") or "< MDA>",
+            "raw_text": data.get("raw_text") or "",
+            "source_date": source_date.isoformat(),
+            "source_sample_id": record.get("sample_id") or "",
+            "source_row": record.get("row"),
+            "source_activity_total_bq": record.get("activity_total_bq"),
+            "source_activity_total_text": _format_scientific(record.get("activity_total_bq")),
+            "day_offset": day_offset,
+            "day_offset_text": f"{day_offset:+d}",
+        }
+    return selected
+
+
+def _build_total_activity_window_rows(
+    total_records: list[dict[str, Any]],
+    detail_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    anchors = _group_total_activity_by_date(total_records)
+    grouped_detail = _detail_records_by_date(detail_records)
+    target_radionuclides = [radionuclide for radionuclide in EXPECTED_RADIONUCLIDES]
+    rows: list[dict[str, Any]] = []
+    for anchor in anchors:
+        anchor_date = anchor["date_value"]
+        window = _minimum_radionuclide_window(anchor_date, grouped_detail, target_radionuclides)
+        if window is None:
+            rows.append(
+                {
+                    **{key: value for key, value in anchor.items() if key != "date_value"},
+                    "anchor_date": anchor["date"],
+                    "window_start_date": "",
+                    "window_end_date": "",
+                    "window_span_days": None,
+                    "window_span_days_text": "—",
+                    "window_row_count": 0,
+                    "complete": False,
+                    "status": "sem janela mínima",
+                    "numeric_count": 0,
+                    "censored_count": 0,
+                    "missing_count": len(target_radionuclides),
+                    "numeric_radionuclides": [],
+                    "censored_radionuclides": [],
+                    "missing_radionuclides": target_radionuclides,
+                    "covered_radionuclides": [],
+                    "selected_radionuclides": {},
+                    "extends_beyond_anchor": False,
+                }
+            )
+            continue
+        selected = _select_window_radionuclides(window["records"], anchor_date, EMPIRICAL_ACTIVITY_RADIONUCLIDES)
+        numeric_radionuclides = [rad for rad, item in selected.items() if item.get("status") == "numérico"]
+        censored_radionuclides = [rad for rad, item in selected.items() if item.get("status") == "censurado"]
+        missing_radionuclides = [rad for rad in target_radionuclides if (selected.get(rad) or {}).get("status") == "ausente"]
+        covered_radionuclides = [rad for rad in target_radionuclides if rad not in missing_radionuclides]
+        rows.append(
+            {
+                **{key: value for key, value in anchor.items() if key != "date_value"},
+                "anchor_date": anchor["date"],
+                "window_start_date": window["start_date"].isoformat(),
+                "window_end_date": window["end_date"].isoformat(),
+                "window_span_days": window["span_days"],
+                "window_span_days_text": str(window["span_days"]),
+                "window_row_count": window["row_count"],
+                "complete": len(covered_radionuclides) >= TOTAL_ACTIVITY_WINDOW_TARGET_RADIONUCLIDES,
+                "status": "janela mínima completa" if len(covered_radionuclides) >= TOTAL_ACTIVITY_WINDOW_TARGET_RADIONUCLIDES else "janela incompleta",
+                "numeric_count": len(numeric_radionuclides),
+                "censored_count": len(censored_radionuclides),
+                "missing_count": len(missing_radionuclides),
+                "filled_count": len(covered_radionuclides),
+                "numeric_radionuclides": numeric_radionuclides,
+                "censored_radionuclides": censored_radionuclides,
+                "missing_radionuclides": missing_radionuclides,
+                "covered_radionuclides": covered_radionuclides,
+                "selected_radionuclides": selected,
+                "extends_beyond_anchor": window["span_days"] > 0,
+            }
+        )
+    return rows
+
+
+def _total_activity_formula_rows() -> list[dict[str, str]]:
+    return [
+        {"name": "Fração radionuclídica", "symbol": "Si", "formula": "valor_radionuclídeo / soma_dos_radionuclídeos_numéricos"},
+        {"name": "Atividade do radionuclídeo", "symbol": "Ai", "formula": "A-TAR * Si"},
+        {"name": "Água", "symbol": "C_água", "formula": "Ai / vazão_do_cenário"},
+        {"name": "Peixe", "symbol": "C_peixe", "formula": "C_água * Bp_peixe"},
+        {"name": "Invertebrado", "symbol": "C_invertebrado", "formula": "C_água * Bp_invertebrado"},
+        {"name": "Constante de decaimento", "symbol": "λ", "formula": "0,693 / meia_vida_h"},
+        {"name": "Fator de acúmulo", "symbol": "F_acúmulo", "formula": "1 - exp(-λ * 262980)"},
+        {"name": "Sedimento", "symbol": "C_sedimento", "formula": "C_água * 0,000072 * (F_acúmulo / λ)"},
+    ]
+
+
+def _total_activity_constant_rows(scenario: dict[str, Any]) -> list[dict[str, Any]]:
+    flow = (scenario.get("totals") or {}).get("circulation_flow_m3_year")
+    activity = (scenario.get("totals") or {}).get("activity_bq_year")
+    rows: list[dict[str, Any]] = []
+    for row in scenario.get("rows") or []:
+        constants = row.get("constants") or {}
+        rows.append(
+            {
+                "radionuclide": row.get("radionuclide"),
+                "scenario_flow_m3_year": flow,
+                "scenario_flow_text": _format_scientific(flow),
+                "scenario_activity_bq_year": activity,
+                "scenario_activity_text": _format_scientific(activity),
+                "decay_constant_h": constants.get("decay_constant_h"),
+                "decay_constant_h_text": constants.get("decay_constant_h_text") or "—",
+                "half_life_h": constants.get("half_life_h"),
+                "half_life_h_text": constants.get("half_life_h_text") or "—",
+                "bioaccumulation_fish": constants.get("bioaccumulation_fish"),
+                "bioaccumulation_fish_text": constants.get("bioaccumulation_fish_text") or "—",
+                "bioaccumulation_invertebrate": constants.get("bioaccumulation_invertebrate"),
+                "bioaccumulation_invertebrate_text": constants.get("bioaccumulation_invertebrate_text") or "—",
+                "kd_sediment_l_kg": constants.get("kd_sediment_l_kg"),
+                "kd_sediment_l_kg_text": constants.get("kd_sediment_l_kg_text") or "—",
+                "sediment_transfer_factor": SEDIMENT_TRANSFER_FACTOR,
+                "sediment_transfer_factor_text": _format_scientific(SEDIMENT_TRANSFER_FACTOR),
+                "sediment_exposure_time_h": SEDIMENT_EXPOSURE_TIME_H,
+                "sediment_exposure_time_h_text": _format_scientific(SEDIMENT_EXPOSURE_TIME_H),
+            }
+        )
+    return rows
+
+
+def _total_activity_matrix_rows(scenario: dict[str, Any], window_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scenario_rows = _scenario_row_by_radionuclide(scenario)
+    flow = (scenario.get("totals") or {}).get("circulation_flow_m3_year") or DEFAULT_DILUTION_FLOW_M3_YEAR
+    rows: list[dict[str, Any]] = []
+    for window_row in window_rows:
+        if not window_row.get("complete"):
+            continue
+        selected_radionuclides = window_row.get("selected_radionuclides") or {}
+        numeric_sum = sum(
+            float((selected_radionuclides.get(radionuclide) or {}).get("value") or 0.0)
+            for radionuclide in EMPIRICAL_ACTIVITY_RADIONUCLIDES
+            if (selected_radionuclides.get(radionuclide) or {}).get("value") is not None
+        )
+        if numeric_sum <= 0 or flow <= 0:
+            continue
+        for radionuclide in EXPECTED_RADIONUCLIDES:
+            scenario_row = scenario_rows.get(radionuclide)
+            selected = selected_radionuclides.get(radionuclide) or {}
+            detected_value = selected.get("value")
+            if not scenario_row or detected_value is None or detected_value <= 0:
+                continue
+            fraction = float(detected_value) / numeric_sum
+            activity_bq = float(window_row["activity_total_bq"]) * fraction
+            water_value = activity_bq / float(flow)
+            constants = scenario_row.get("constants") or {}
+            decay_constant = constants.get("decay_constant_h")
+            accumulation_factor = (
+                1.0 - math.exp(-float(decay_constant) * SEDIMENT_EXPOSURE_TIME_H)
+                if decay_constant not in (None, 0)
+                else None
+            )
+            compartment_values = {
+                "water": water_value,
+                "fish": water_value * float(constants.get("bioaccumulation_fish"))
+                if constants.get("bioaccumulation_fish") is not None
+                else None,
+                "invertebrate": water_value * float(constants.get("bioaccumulation_invertebrate"))
+                if constants.get("bioaccumulation_invertebrate") is not None
+                else None,
+                "sediment": (
+                    water_value * SEDIMENT_TRANSFER_FACTOR * (accumulation_factor / float(decay_constant))
+                    if accumulation_factor is not None and decay_constant not in (None, 0)
+                    else None
+                ),
+            }
+            for compartment in COMPARTMENTS:
+                value = compartment_values.get(compartment["key"])
+                if value is None:
+                    continue
+                base_data = scenario_row["compartments"][compartment["key"]]
+                rows.append(
+                    {
+                        "date": window_row["anchor_date"],
+                        "anchor_date": window_row["anchor_date"],
+                        "window_start_date": window_row.get("window_start_date", ""),
+                        "window_end_date": window_row.get("window_end_date", ""),
+                        "window_span_days": window_row.get("window_span_days"),
+                        "window_span_days_text": window_row.get("window_span_days_text", "—"),
+                        "sample_id": selected.get("source_sample_id") or "",
+                        "source_date": selected.get("source_date") or "",
+                        "source_sample_id": selected.get("source_sample_id") or "",
+                        "source_day_offset": selected.get("day_offset"),
+                        "source_day_offset_text": selected.get("day_offset_text") or "—",
+                        "activity_total_bq": window_row["activity_total_bq"],
+                        "activity_total_text": window_row["activity_total_text"],
+                        "radionuclide": radionuclide,
+                        "radionuclide_value": detected_value,
+                        "radionuclide_value_text": _format_scientific(detected_value),
+                        "detected_sum": numeric_sum,
+                        "detected_sum_text": _format_scientific(numeric_sum),
+                        "fraction": fraction,
+                        "fraction_text": _format_decimal(fraction, digits=6),
+                        "activity_bq": activity_bq,
+                        "activity_bq_text": _format_scientific(activity_bq),
+                        "compartment_key": compartment["key"],
+                        "compartment": compartment["label"],
+                        "unit": compartment["unit"],
+                        "value": value,
+                        "value_text": _format_scientific(value),
+                        "report_level": base_data.get("report_level"),
+                        "report_level_text": base_data.get("report_level_text"),
+                        "lld": base_data.get("lld"),
+                        "lld_text": base_data.get("lld_text"),
+                        "decay_constant_h": decay_constant,
+                        "decay_constant_h_text": constants.get("decay_constant_h_text") or "—",
+                        "bioaccumulation_fish": constants.get("bioaccumulation_fish"),
+                        "bioaccumulation_invertebrate": constants.get("bioaccumulation_invertebrate"),
+                        "kd_sediment_l_kg": constants.get("kd_sediment_l_kg"),
+                        "accumulation_factor": accumulation_factor,
+                        "accumulation_factor_text": _format_decimal(accumulation_factor, digits=6),
+                    }
+                )
+    return rows
+
+
+def _generated_erica_value(calculated_value: float | None, rng: random.Random) -> float | None:
+    if calculated_value is None or calculated_value <= 0:
+        return None
+    return float(calculated_value) * rng.lognormvariate(0.0, 0.35)
+
+
+def _total_activity_erica_pair_rows(matrix_rows: list[dict[str, Any]], *, seed: int) -> list[dict[str, Any]]:
+    rng = random.Random(seed)
+    rows: list[dict[str, Any]] = []
+    for item in matrix_rows:
+        erica_value = _erica_value(item["radionuclide"], item["compartment_key"])
+        generated = erica_value is None
+        if generated:
+            erica_value = _generated_erica_value(item.get("value"), rng)
+        ratio = item["value"] / erica_value if erica_value not in (None, 0) else None
+        rows.append(
+            {
+                "date": item["date"],
+                "sample_id": item.get("sample_id", ""),
+                "radionuclide": item["radionuclide"],
+                "compartment_key": item["compartment_key"],
+                "compartment": item["compartment"],
+                "unit": item["unit"],
+                "calculated_value": item["value"],
+                "calculated_value_text": item["value_text"],
+                "erica_value": erica_value,
+                "erica_value_text": f"{_format_scientific(erica_value)}*" if generated else _format_scientific(erica_value),
+                "erica_generated": generated,
+                "erica_source": "gerado aleatoriamente com *" if generated else "extraído do PDF/artigo",
+                "ratio": ratio,
+                "ratio_text": _format_decimal(ratio),
+            }
+        )
+    return rows
+
+
+def _total_activity_norm_comparison_rows(matrix_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in matrix_rows:
+        for reference_key, reference_label in (("report_level", "Report Level"), ("lld", "LLD")):
+            reference_value = item.get(reference_key)
+            if reference_value is None:
+                continue
+            result = _ratio_status(item.get("value"), reference_value)
+            rows.append(
+                {
+                    "date": item["date"],
+                    "sample_id": item.get("sample_id", ""),
+                    "radionuclide": item["radionuclide"],
+                    "compartment_key": item["compartment_key"],
+                    "compartment": item["compartment"],
+                    "unit": item["unit"],
+                    "reference": reference_label,
+                    "reference_value": reference_value,
+                    "reference_value_text": _format_scientific(reference_value),
+                    "value": item.get("value"),
+                    "value_text": item.get("value_text"),
+                    "ratio": result["ratio"],
+                    "ratio_text": _format_decimal(result["ratio"]),
+                    "status": result["status"],
+                    "note": "LLD é referência de detecção" if reference_label == "LLD" else "Report Level é critério de notificação",
+                }
+            )
+    return rows
+
+
+def _total_activity_erica_chart_payloads(erica_pair_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_rows = [
+        row
+        for row in erica_pair_rows
+        if row.get("ratio") is not None and row.get("calculated_value") is not None and row.get("erica_value") is not None
+    ]
+
+    def point(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "date": row.get("date", ""),
+            "sample_id": row.get("sample_id", ""),
+            "radionuclide": row.get("radionuclide", ""),
+            "compartment_key": row.get("compartment_key", ""),
+            "compartment": row.get("compartment", ""),
+            "ratio": row.get("ratio"),
+            "ratio_text": row.get("ratio_text", "—"),
+            "calculated_value": row.get("calculated_value"),
+            "calculated_value_text": row.get("calculated_value_text", "—"),
+            "erica_value": row.get("erica_value"),
+            "erica_value_text": row.get("erica_value_text", "—"),
+            "erica_generated": bool(row.get("erica_generated")),
+            "erica_source": row.get("erica_source", ""),
+        }
+
+    def build_scope(scope_key: str, scope_label: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        ratios = [float(row["ratio"]) for row in rows if row.get("ratio") is not None and float(row["ratio"]) > 0]
+        return {
+            "scope_key": scope_key,
+            "scope_label": scope_label,
+            "n": len(ratios),
+            "generated_erica_count": sum(1 for row in rows if row.get("erica_generated")),
+            "stats": _ratio_summary_with_text(ratios),
+            "points": [point(row) for row in sorted(rows, key=lambda item: (str(item.get("date") or ""), str(item.get("radionuclide") or ""), str(item.get("compartment") or "")))],
+        }
+
+    scopes = [build_scope("all", "Geral", valid_rows)]
+    for compartment in COMPARTMENTS:
+        rows = [row for row in valid_rows if row.get("compartment_key") == compartment["key"]]
+        scopes.append(build_scope(str(compartment["key"]), str(compartment["label"]), rows))
+
+    heatmap_cells: list[dict[str, Any]] = []
+    for radionuclide in EXPECTED_RADIONUCLIDES:
+        for compartment in COMPARTMENTS:
+            rows = [
+                row
+                for row in valid_rows
+                if row.get("radionuclide") == radionuclide and row.get("compartment_key") == compartment["key"]
+            ]
+            ratios = [float(row["ratio"]) for row in rows if row.get("ratio") is not None and float(row["ratio"]) > 0]
+            stats_summary = _ratio_summary_with_text(ratios)
+            heatmap_cells.append(
+                {
+                    "radionuclide": radionuclide,
+                    "compartment_key": compartment["key"],
+                    "compartment": compartment["label"],
+                    "n": len(ratios),
+                    "generated_erica_count": sum(1 for row in rows if row.get("erica_generated")),
+                    "median_ratio": stats_summary["median"],
+                    "median_ratio_text": stats_summary["median_text"],
+                    "p95_ratio": stats_summary["p95"],
+                    "p95_ratio_text": stats_summary["p95_text"],
+                }
+            )
+    return {
+        "reference_ratio": 1.0,
+        "reference_label": "calculado / ERICA = 1",
+        "axis_scale": "log10",
+        "scope_rows": scopes,
+        "heatmap": {
+            "radionuclides": EXPECTED_RADIONUCLIDES,
+            "compartments": [{"key": compartment["key"], "label": compartment["label"]} for compartment in COMPARTMENTS],
+            "cells": heatmap_cells,
+        },
+        "explanation": (
+            "A razão calculado/ERICA igual a 1 representa equivalência entre o valor obtido por fórmula e o valor do ERICA Tool. "
+            "Razões acima de 1 indicam cálculo por fórmula maior que ERICA; razões abaixo de 1 indicam cálculo menor. "
+            "A escala log10 evita que valores extremos escondam os pontos próximos de 1."
+        ),
+    }
+
+
+def _total_activity_erica_inferential_rows(erica_pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_group(group_type: str, scope: str, row: dict[str, Any]) -> None:
+        key = (group_type, scope)
+        grouped.setdefault(
+            key,
+            {
+                "calculated": [],
+                "erica": [],
+                "generated": 0,
+                "compartment_key": "",
+                "compartment": "",
+                "radionuclide": "Todos",
+            },
+        )
+        grouped[key]["calculated"].append(row["calculated_value"])
+        grouped[key]["erica"].append(row["erica_value"])
+        grouped[key]["generated"] += 1 if row.get("erica_generated") else 0
+        if group_type == "Matriz":
+            grouped[key]["compartment_key"] = row.get("compartment_key", "")
+            grouped[key]["compartment"] = row.get("compartment", "")
+        elif group_type == "Radionuclídeo":
+            grouped[key]["radionuclide"] = row.get("radionuclide", "")
+            grouped[key]["compartment"] = "Todos os compartimentos"
+        elif group_type == "Radionuclídeo-matriz":
+            grouped[key]["radionuclide"] = row.get("radionuclide", "")
+            grouped[key]["compartment_key"] = row.get("compartment_key", "")
+            grouped[key]["compartment"] = row.get("compartment", "")
+
+    for row in erica_pair_rows:
+        add_group("Geral", "Todos os compartimentos", row)
+        add_group("Matriz", str(row.get("compartment") or ""), row)
+        add_group("Radionuclídeo", str(row.get("radionuclide") or ""), row)
+        add_group("Radionuclídeo-matriz", f"{row.get('radionuclide')} - {row.get('compartment')}", row)
+
+    rows: list[dict[str, Any]] = []
+    order = {"Geral": 0, "Matriz": 1, "Radionuclídeo": 2, "Radionuclídeo-matriz": 3}
+    for (group_type, scope), values in sorted(grouped.items(), key=lambda item: (order.get(item[0][0], 99), item[0][1])):
+        paired = _paired_calculated_erica_test(values["calculated"], values["erica"])
+        generated_count = int(values.get("generated") or 0)
+        suffix = " Inclui valores ERICA gerados com *; interpretação exploratória." if generated_count else ""
+        paired.update(
+            {
+                "comparison_type": "Calculado vs ERICA",
+                "group_type": group_type,
+                "scope": scope,
+                "radionuclide": values.get("radionuclide") or "Todos",
+                "compartment_key": values.get("compartment_key", ""),
+                "compartment": values.get("compartment") or scope,
+                "reference": "ERICA Tool",
+                "reference_value": None,
+                "reference_value_text": "—",
+                "generated_erica_count": generated_count,
+                "generated_erica_count_text": str(generated_count),
+                "conclusion": f"{paired.get('conclusion') or paired.get('reason') or ''}{suffix}",
+            }
+        )
+        rows.append(paired)
+    return rows
+
+
+def _total_activity_norm_inferential_rows(norm_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in norm_rows:
+        key = (row["radionuclide"], row["compartment_key"], row["reference"])
+        item = grouped.setdefault(
+            key,
+            {
+                "values": [],
+                "radionuclide": row["radionuclide"],
+                "compartment_key": row["compartment_key"],
+                "compartment": row["compartment"],
+                "reference": row["reference"],
+                "reference_value": row["reference_value"],
+                "reference_value_text": row["reference_value_text"],
+            },
+        )
+        item["values"].append(row["value"])
+    rows: list[dict[str, Any]] = []
+    for item in grouped.values():
+        reference_label = str(item["reference"])
+        inference = _real_reference_inference(item["values"], item["reference_value"], reference_label)
+        conclusion = inference.get("conclusion") or inference.get("reason") or ""
+        if reference_label == "LLD":
+            conclusion = f"{conclusion} LLD é referência de detecção, não limite de ação."
+        inference.update(
+            {
+                "comparison_type": f"Valor vs {reference_label}",
+                "scope": f"{item['radionuclide']} - {item['compartment']}",
+                "radionuclide": item["radionuclide"],
+                "compartment_key": item["compartment_key"],
+                "compartment": item["compartment"],
+                "reference": reference_label,
+                "reference_value": item["reference_value"],
+                "reference_value_text": item["reference_value_text"],
+                "generated_erica_count": 0,
+                "generated_erica_count_text": "0",
+                "conclusion": conclusion,
+            }
+        )
+        rows.append(inference)
+    return rows
+
+
+def _build_total_activity_review(
+    scenario: dict[str, Any],
+    *,
+    total_activity_workbook_path: str | Path,
+    radionuclide_activity_workbook_path: str | Path,
+    seed: int,
+) -> dict[str, Any]:
+    total_loaded = _load_total_activity_records(total_activity_workbook_path)
+    detail_loaded = _load_empirical_activity_records(radionuclide_activity_workbook_path)
+    total_records = total_loaded["records"]
+    detail_records = detail_loaded["records"]
+    ordered_records = sorted(total_records, key=lambda item: item["activity_total_bq"], reverse=True)
+    top15_rows = [
+        _total_activity_joined_row(rank, total_record, _match_total_activity_record(total_record, detail_records))
+        for rank, total_record in enumerate(ordered_records[:TOTAL_ACTIVITY_REVIEW_TOP_N], start=1)
+    ]
+    complete_rows = _complete_total_activity_rows(total_records, detail_records)
+    window_rows = _build_total_activity_window_rows(total_records, detail_records)
+    matrix_rows = _total_activity_matrix_rows(scenario, window_rows)
+    erica_pair_rows = _total_activity_erica_pair_rows(matrix_rows, seed=seed)
+    erica_chart_payloads = _total_activity_erica_chart_payloads(erica_pair_rows)
+    norm_comparison_rows = _total_activity_norm_comparison_rows(matrix_rows)
+    erica_inferential_rows = _total_activity_erica_inferential_rows(erica_pair_rows)
+    norm_inferential_rows = _total_activity_norm_inferential_rows(norm_comparison_rows)
+    generated_erica_count = sum(1 for row in erica_pair_rows if row.get("erica_generated"))
+    complete_dates = [row["date"] for row in complete_rows]
+    window_dates = [row["anchor_date"] for row in window_rows if row.get("complete")]
+    narrative_text = (
+        "A revisão cruza as maiores atividades totais do tanque com a planilha de radionuclídeos por data e A-TAR. "
+        "A auditoria mantém as 15 maiores linhas, mas os cálculos por matriz usam janelas mínimas por data: para cada "
+        "data da planilha Dados, o sistema procura a menor janela cronológica no TAR - Afluente que reúna pelo menos "
+        "8 radionuclídeos modelados. Valores < MDA> contam como preenchidos censurados para fechar a janela, mas não "
+        "entram no denominador numérico de Si. Os valores ERICA gerados, quando necessários, são marcados com * e "
+        "entram nos testes apenas com ressalva exploratória."
+    )
+    return {
+        "synthetic": False,
+        "source_total_workbook_path": total_loaded["path"],
+        "source_total_sheet": total_loaded["sheet"],
+        "source_radionuclide_workbook_path": detail_loaded["path"],
+        "source_radionuclide_sheet": detail_loaded["sheet"],
+        "source_note": "Top 15 por A-TAR da planilha Dados; cálculos somente em linhas completas da mesma lista.",
+        "mda_policy": "< MDA> conta como preenchido censurado e não participa da soma numérica usada em Si.",
+        "top_n": TOTAL_ACTIVITY_REVIEW_TOP_N,
+        "top15_rows": top15_rows,
+        "complete_rows": complete_rows,
+        "complete_dates": complete_dates,
+        "window_rows": window_rows,
+        "window_dates": window_dates,
+        "window_target_radionuclide_count": TOTAL_ACTIVITY_WINDOW_TARGET_RADIONUCLIDES,
+        "window_target_radionuclides": EXPECTED_RADIONUCLIDES,
+        "formula_rows": _total_activity_formula_rows(),
+        "constant_rows": _total_activity_constant_rows(scenario),
+        "matrix_rows": matrix_rows,
+        "erica_pair_rows": erica_pair_rows,
+        "erica_chart_payloads": erica_chart_payloads,
+        "norm_comparison_rows": norm_comparison_rows,
+        "inferential_rows": [*erica_inferential_rows, *norm_inferential_rows],
+        "narrative_text": narrative_text,
+        "cards": [
+            {"label": "Linhas auditadas", "value": _format_count(len(top15_rows))},
+            {"label": "Datas com janela", "value": _format_count(len(window_dates))},
+            {"label": "Linhas completas exatas", "value": _format_count(len(complete_rows))},
+            {"label": "Resultados por matriz", "value": _format_count(len(matrix_rows))},
+            {"label": "Nº ERICA gerado", "value": _format_count(generated_erica_count)},
+        ],
+    }
+
+
 def _synthetic_replicates(base_value: float | None, count: int, rng: random.Random) -> list[float]:
     if base_value is None or base_value <= 0:
         return []
@@ -1609,6 +2494,7 @@ def _hypothetical_scenario_summary(
                 "min_text": _format_scientific(measurement_summary["min"]),
                 "max_text": _format_scientific(measurement_summary["max"]),
             },
+            "constants": dict(base_row.get("constants") or {}),
             "compartments": {},
         }
         for compartment in COMPARTMENTS:
@@ -1784,6 +2670,7 @@ def build_tar_summary(
     scenario: Any = "a1",
     *,
     activity_workbook_path: str | Path | None = None,
+    total_activity_workbook_path: str | Path | None = None,
     hypothetical_n: Any = 60,
     hypothetical_seed: Any = 20260504,
     sensitivity_n: Any = DEFAULT_SENSITIVITY_N,
@@ -1810,9 +2697,16 @@ def build_tar_summary(
         seed=resolved_stat_seed,
     )
     resolved_activity_path = _empirical_activity_path(workbook_path, activity_workbook_path)
+    resolved_total_activity_path = _total_activity_path(workbook_path, total_activity_workbook_path)
     scenario_model["empirical_activity_statistics"] = _build_empirical_activity_statistics(
         scenario_model,
         activity_workbook_path=resolved_activity_path,
+    )
+    scenario_model["total_activity_review"] = _build_total_activity_review(
+        scenario_model,
+        total_activity_workbook_path=resolved_total_activity_path,
+        radionuclide_activity_workbook_path=resolved_activity_path,
+        seed=resolved_stat_seed,
     )
     scenario_model["sensitivity"] = {}
     inferential_assessment = _empirical_inferential_assessment(scenario_model["empirical_activity_statistics"])
@@ -1820,6 +2714,7 @@ def build_tar_summary(
         "ok": True,
         "workbook_path": model["workbook_path"],
         "activity_workbook_path": str(resolved_activity_path),
+        "total_activity_workbook_path": str(resolved_total_activity_path),
         "selected_scenario": scenario_key,
         "available_scenarios": [
             {"key": key, "label": value["label"], "sheet": value["sheet"]}

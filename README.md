@@ -51,4 +51,5 @@ Variáveis esperadas:
 
 - `TAR_WORKBOOK_PATH=./Cópia de TAR.xlsx`
 - `TAR_ACTIVITY_WORKBOOK_PATH=./Atividade Total TAR c radionuclideos.xls`
+- `TAR_TOTAL_ACTIVITY_WORKBOOK_PATH=./Dados Atividade TAR - Jayme (1).xlsx`
 - `TAR_ARTICLE_PATH=./Artigo TAR1 correção.pdf`

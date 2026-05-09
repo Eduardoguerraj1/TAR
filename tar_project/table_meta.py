@@ -374,6 +374,151 @@ TAR_TABLES: dict[str, dict[str, Any]] = {
         ],
         "unit_note": "n representa contagem de observações ou pares, conforme o teste.",
     },
+    "total_activity_top15": {
+        "number": 20,
+        "caption": "Auditoria das 15 maiores atividades totais do tanque",
+        "lead_text": (
+            "A {table} lista as 15 maiores linhas de A-TAR da planilha Dados e mostra a correspondência com a planilha de radionuclídeos. "
+            "A chave de cruzamento é data mais A-TAR, porque algumas datas aparecem mais de uma vez. "
+            "Assim, a tabela preserva a auditoria das maiores atividades mesmo quando a composição radionuclídica não está completa."
+        ),
+        "column_notes": [
+            "Rank: posição da linha na ordenação decrescente por A-TAR.",
+            "Data: data da atividade total do tanque.",
+            "A-TAR: atividade total do tanque em Bq.",
+            "Amostra: identificação encontrada na planilha de radionuclídeos.",
+            "Status: indica se a linha está completa, incompleta ou sem correspondência.",
+            "Numéricos, < MDA e ausentes: contagem de radionuclídeos por tipo de preenchimento.",
+        ],
+        "unit_note": "A-TAR é apresentado em Bq.",
+    },
+    "total_activity_complete": {
+        "number": 21,
+        "caption": "Janelas mínimas usadas nos cálculos",
+        "lead_text": (
+            "A {table} separa cada data da planilha Dados em uma janela cronológica mínima capaz de reunir pelo menos 8 radionuclídeos modelados. "
+            "Valores < MDA contam como preenchimento censurado para fechar a janela, mas não entram na soma numérica usada no cálculo de Si. "
+            "Assim, os cálculos por matriz usam as datas mais próximas possíveis sem inventar composição radionuclídica."
+        ),
+        "column_notes": [
+            "Data âncora: data da atividade total na planilha Dados.",
+            "Janela: intervalo de datas usado para reunir os radionuclídeos.",
+            "Dias: tamanho da janela em dias.",
+            "A-TAR máx.: maior atividade total registrada nessa data âncora.",
+            "Numéricos e < MDA: quantidade de radionuclídeos selecionados por tipo.",
+            "Radionuclídeos: lista dos radionuclídeos cobertos pela janela.",
+        ],
+        "unit_note": "A-TAR é apresentado em Bq.",
+    },
+    "total_activity_formulas": {
+        "number": 22,
+        "caption": "Fórmulas aplicadas às linhas completas",
+        "lead_text": (
+            "A {table} documenta as fórmulas usadas para transformar A-TAR e atividade por radionuclídeo em resultados por matriz. "
+            "As fórmulas seguem a estrutura da planilha Cópia de TAR.xlsx para água, peixe, invertebrado e sedimento. "
+            "Assim, a reprodução do cálculo fica explícita antes das comparações estatísticas."
+        ),
+        "column_notes": [
+            "Cálculo: etapa do processamento.",
+            "Símbolo: variável usada no relatório.",
+            "Fórmula: expressão aplicada.",
+        ],
+        "unit_note": "As unidades resultam da matriz: Bq/m³ para água e Bq/kg para biota/sedimento.",
+    },
+    "total_activity_constants": {
+        "number": 23,
+        "caption": "Constantes e fatores da planilha TAR",
+        "lead_text": (
+            "A {table} reúne as constantes lidas da aba de cenário selecionada na planilha Cópia de TAR.xlsx. "
+            "Esses valores alimentam as fórmulas de incorporação em peixe, invertebrado e sedimento. "
+            "Assim, cada cálculo pode ser rastreado até vazão, meia-vida, fatores de bioacumulação, Kd e parâmetros sedimentares."
+        ),
+        "column_notes": [
+            "Radionuclídeo: radionuclídeo modelado na planilha TAR.",
+            "Vazão: vazão anual do cenário selecionado.",
+            "λ e meia-vida: parâmetros de decaimento.",
+            "Bp peixe e Bp inv.: fatores de bioacumulação.",
+            "Kd: fator registrado para sedimento na planilha.",
+            "Fator sed. e tempo: constantes usadas na fórmula sedimentar.",
+        ],
+        "unit_note": "Vazão em m³/ano, λ em h⁻¹, meia-vida em h e Kd em L/kg.",
+    },
+    "total_activity_matrix": {
+        "number": 24,
+        "caption": "Resultados calculados por data, radionuclídeo e matriz",
+        "lead_text": (
+            "A {table} apresenta os resultados calculados para as janelas mínimas. "
+            "A fração Si é calculada em cada data âncora usando a soma dos radionuclídeos numéricos selecionados na janela e depois aplicada à A-TAR. "
+            "Assim, cada valor de água, peixe, invertebrado e sedimento mantém vínculo com a data âncora e a data fonte do radionuclídeo."
+        ),
+        "column_notes": [
+            "Data âncora e janela: origem temporal do cálculo.",
+            "Radionuclídeo: radionuclídeo numérico usado.",
+            "Data fonte: data do valor de radionuclídeo selecionado dentro da janela.",
+            "Si: fração calculada pela composição numérica.",
+            "Ai: atividade atribuída ao radionuclídeo.",
+            "Matriz: compartimento ambiental.",
+            "Resultado: valor calculado na unidade da matriz.",
+        ],
+        "unit_note": "Água em Bq/m³; peixe, invertebrado e sedimento em Bq/kg.",
+    },
+    "total_activity_erica": {
+        "number": 25,
+        "caption": "Pares calculado vs ERICA Tool",
+        "lead_text": (
+            "A {table} pareia cada resultado calculado com o valor correspondente do ERICA Tool. "
+            "Quando o valor ERICA não estiver disponível, o sistema gera valor reprodutível e marca com asterisco. "
+            "Assim, a tabela permite o teste pareado sem esconder quais pares dependem de valor gerado; a coluna 'Nº ERICA gerado' é contagem, não concentração."
+        ),
+        "column_notes": [
+            "Radionuclídeo e matriz: grupo comparado.",
+            "Pares e datas: quantidade de pares calculado/ERICA e datas distintas usadas.",
+            "Média calculada: média dos resultados obtidos por fórmula TAR.",
+            "Média ERICA: média dos valores ERICA extraídos ou gerados.",
+            "Razão mín. a máx.: faixa da razão calculado/ERICA.",
+            "Nº ERICA gerado: quantidade de pares em que o valor ERICA precisou ser reproduzido por stat_seed; zero não significa ERICA igual a zero.",
+        ],
+        "unit_note": "Calculado e ERICA usam a unidade da matriz; razões são adimensionais.",
+    },
+    "total_activity_norms": {
+        "number": 26,
+        "caption": "Comparação com Report Level e LLD por linha completa",
+        "lead_text": (
+            "A {table} compara cada resultado calculado com as referências normativas disponíveis. "
+            "Report Level é critério de notificação e LLD é referência de detecção. "
+            "Assim, a leitura normativa fica separada do teste pareado com ERICA."
+        ),
+        "column_notes": [
+            "Data e amostra: origem do cálculo.",
+            "Radionuclídeo e matriz: resultado avaliado.",
+            "Referência: Report Level ou LLD.",
+            "Valor calculado: resultado por matriz.",
+            "Valor referência: valor normativo lido da planilha TAR.",
+            "Razão e status: posição do resultado frente à referência.",
+        ],
+        "unit_note": "Valor calculado e referência usam a unidade da matriz.",
+    },
+    "total_activity_inferential": {
+        "number": 27,
+        "caption": "Testes inferenciais das janelas mínimas",
+        "lead_text": (
+            "A {table} resume os testes estatísticos aplicados aos resultados das janelas mínimas. "
+            "A comparação com ERICA usa log(calculado/ERICA); a comparação com Report Level e LLD usa log(valor/referência). "
+            "Assim, p-values são apresentados com a ressalva de que valores ERICA gerados com asterisco tornam a inferência exploratória."
+        ),
+        "column_notes": [
+            "Comparação: tipo de contraste estatístico.",
+            "Escopo: todos os compartimentos, matriz ou radionuclídeo-matriz.",
+            "n: número de pares ou valores válidos.",
+            "Referência: ERICA, Report Level ou LLD.",
+            "Shapiro-Wilk: teste de normalidade dos logaritmos.",
+            "Teste e p-value: procedimento inferencial selecionado.",
+            "P95 razão ou mediana: resumo da razão usada no contraste.",
+            "Nº ERICA gerado: quantidade de pares com ERICA reproduzido por stat_seed no teste.",
+            "Conclusão: leitura exploratória do resultado.",
+        ],
+        "unit_note": "Razões, frequências e p-values são adimensionais.",
+    },
 }
 
 

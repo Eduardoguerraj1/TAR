@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from html import escape
+import math
+import re
+from html import escape, unescape
 from pathlib import Path
 from typing import Any
 
 from .model import COMPARTMENTS, INFERENTIAL_TEST_MINIMUMS, SCENARIOS
 from .table_meta import tar_table_meta
+
+
+REPORT_FULL_TITLE = (
+    "Avaliação do risco radiológico ambiental em ambiente marinho e seus compartimentos "
+    "a partir de uma liberação não planejada em uma usina nuclear do tipo PWR"
+)
 
 
 def _text(value: Any) -> str:
@@ -79,6 +87,76 @@ def _column_notes_html(notes: list[str]) -> str:
     return f'<div class="column-notes-block"><strong>Leitura das colunas</strong><ol class="column-notes">{items}</ol></div>'
 
 
+def _table_intro_text(caption: str, intro: str) -> str:
+    if intro:
+        return intro
+    clean_caption = " ".join((caption or "tabela").split())
+    return (
+        f"A tabela {clean_caption} apresenta os registros correspondentes a este bloco do relatório. "
+        "A leitura deve considerar o título, as unidades indicadas e as notas de coluna apresentadas após a tabela."
+    )
+
+
+def _table_column_count(header_html: str) -> int:
+    first_row = re.search(r"<tr\b[^>]*>(.*?)</tr>", header_html, flags=re.IGNORECASE | re.DOTALL)
+    target = first_row.group(1) if first_row else header_html
+    return len(re.findall(r"<th\b", target, flags=re.IGNORECASE))
+
+
+def _table_first_row(html: str) -> str:
+    first_row = re.search(r"<tr\b[^>]*>(.*?)</tr>", html, flags=re.IGNORECASE | re.DOTALL)
+    return first_row.group(1) if first_row else html
+
+
+def _table_cell_text(cell_html: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", cell_html, flags=re.IGNORECASE | re.DOTALL)
+    return " ".join(unescape(text).split())
+
+
+def _table_row_cells(row_html: str, tag: str) -> list[str]:
+    return [
+        _table_cell_text(match)
+        for match in re.findall(fr"<{tag}\b[^>]*>(.*?)</{tag}>", row_html, flags=re.IGNORECASE | re.DOTALL)
+    ]
+
+
+def _short_numeric_column(values: list[str]) -> bool:
+    filled = [value.strip() for value in values if value.strip() and value.strip() != "—"]
+    if not filled:
+        return False
+    return all(re.fullmatch(r"[+-]?\d", value) for value in filled)
+
+
+def _table_colgroup_html(header_html: str, body_html: str, column_count: int) -> str:
+    if column_count <= 0:
+        return ""
+    headers = _table_row_cells(_table_first_row(header_html), "th")
+    body_columns: list[list[str]] = [[] for _ in range(column_count)]
+    for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", body_html, flags=re.IGNORECASE | re.DOTALL):
+        cells = _table_row_cells(row_html, "td")
+        for index in range(min(column_count, len(cells))):
+            body_columns[index].append(cells[index])
+
+    weights: list[float] = []
+    for index in range(column_count):
+        header = headers[index] if index < len(headers) else ""
+        values = body_columns[index] if index < len(body_columns) else []
+        header_word = max((len(word) for word in re.findall(r"\S+", header)), default=len(header))
+        max_cell = max((len(value) for value in values), default=0)
+        lowered = f"{header} {' '.join(values[:6])}".lower()
+        if _short_numeric_column(values):
+            weight = max(0.64, min(0.92, header_word * 0.08))
+        elif "status" in lowered or "referência" in lowered or "composi" in lowered:
+            weight = 1.55
+        else:
+            weight = max(0.82, min(1.55, (max(header_word, 5) * 0.08) + (min(max_cell, 18) * 0.055)))
+        weights.append(weight)
+
+    total = sum(weights) or 1.0
+    columns = "".join(f'<col style="width: {(weight / total) * 100:.2f}%">' for weight in weights)
+    return f"<colgroup>{columns}</colgroup>"
+
+
 def _tar_table(
     class_name: str,
     caption: str,
@@ -101,15 +179,143 @@ def _tar_table(
         source_note = source_note or meta.get("source_note") or ""
     note_parts = [part for part in [unit_note, note, source_note] if part]
     note_html = "".join(f'<p class="table-note">{escape(part)}</p>' for part in note_parts)
+    legend_html = "".join(part for part in [note_html, _column_notes_html(column_notes)] if part)
+    if legend_html:
+        legend_html = f'<div class="table-legend">{legend_html}</div>'
+    column_count = _table_column_count(header_html)
+    class_parts = class_name.split()
+    fit_table = column_count >= 8
+    if column_count >= 8 and "tar-table--wide" not in class_parts:
+        class_parts.append("tar-table--wide")
+    if fit_table and "tar-table--fit" not in class_parts:
+        class_parts.append("tar-table--fit")
+    resolved_class_name = " ".join(class_parts)
+    scroll_class = "table-scroll table-scroll--fit" if fit_table else "table-scroll"
+    colgroup_html = _table_colgroup_html(header_html, body_html, column_count) if fit_table else ""
     return (
-        f"{_explain_text(intro)}"
-        f"{_column_notes_html(column_notes)}"
-        f'<table class="tar-table {class_name}">'
+        f"{_explain_text(_table_intro_text(caption, intro))}"
+        f'<div class="{scroll_class}">'
+        f'<table class="tar-table {resolved_class_name}">'
         f"<caption>{escape(caption)}</caption>"
+        f"{colgroup_html}"
         f"<thead>{header_html}</thead>"
         f"<tbody>{body_html}</tbody></table>"
-        f"{note_html}"
+        f"</div>"
+        f"{legend_html}"
     )
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric:
+        return None
+    return numeric
+
+
+def _numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        numeric = _safe_float(row.get(key))
+        if numeric is not None:
+            values.append(numeric)
+    return values
+
+
+def _min_max_text(values: list[float]) -> str:
+    if not values:
+        return "—"
+    return f"{_format_sci(min(values))} a {_format_sci(max(values))}"
+
+
+def _mean_text(values: list[float]) -> str:
+    if not values:
+        return "—"
+    return _format_sci(sum(values) / len(values))
+
+
+def _compartment_sort_key(compartment_key: str) -> int:
+    for index, compartment in enumerate(COMPARTMENTS):
+        if compartment.get("key") == compartment_key:
+            return index
+    return len(COMPARTMENTS)
+
+
+def _group_by_radionuclide_matrix(
+    rows: list[dict[str, Any]],
+) -> list[tuple[tuple[str, str, str], list[dict[str, Any]]]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        radionuclide = str(row.get("radionuclide") or "—")
+        compartment_key = str(row.get("compartment_key") or "")
+        compartment = str(row.get("compartment") or "—")
+        grouped.setdefault((radionuclide, compartment_key, compartment), []).append(row)
+    return sorted(grouped.items(), key=lambda item: (item[0][0], _compartment_sort_key(item[0][1]), item[0][2]))
+
+
+def _distinct_count(rows: list[dict[str, Any]], key: str) -> int:
+    return len({str(row.get(key) or "") for row in rows if row.get(key)})
+
+
+def _details_section(title: str, content: str, *, open_by_default: bool = False) -> str:
+    open_attr = " open" if open_by_default else ""
+    return f'<details class="tar-subsection"{open_attr}><summary>{escape(title)}</summary>{content}</details>'
+
+
+def _report_toc(items: list[dict[str, Any]]) -> str:
+    rows = []
+    for index, item in enumerate(items, start=1):
+        item_number = str(item.get("number") or index)
+        children_html = ""
+        children = item.get("children") or []
+        if children:
+            child_rows = []
+            for child_index, child in enumerate(children, start=1):
+                child_number = str(child.get("number") or f"{item_number}.{child_index}")
+                child_rows.append(
+                    "<li>"
+                    f'<a href="#{escape(str(child.get("id") or ""))}"><span class="toc-number">{escape(child_number)}</span>{escape(str(child.get("title") or ""))}</a>'
+                    f'<span>{escape(str(child.get("description") or ""))}</span>'
+                    "</li>"
+                )
+            children_html = f'<ol class="toc-children">{"".join(child_rows)}</ol>'
+        rows.append(
+            "<li>"
+            f'<a class="toc-title" href="#{escape(str(item.get("id") or ""))}">'
+            f'<span class="toc-number">{escape(item_number)}</span>{escape(str(item.get("title") or ""))}</a>'
+            f'<p>{escape(str(item.get("description") or ""))}</p>'
+            f"{children_html}</li>"
+        )
+    return f"""
+<section class="panel toc-panel" id="sumario">
+  <h2>Sumário</h2>
+  <p>Roteiro detalhado do relatório, separando dados, metodologia, cálculos, ERICA Tool, normas e inferência estatística.</p>
+  <ol class="toc-list">{''.join(rows)}</ol>
+</section>
+"""
+
+
+def _toc_item(
+    item_id: str,
+    title: str,
+    description: str,
+    children: list[dict[str, str]] | None = None,
+    *,
+    number: str = "",
+) -> dict[str, Any]:
+    item = {"id": item_id, "title": title, "description": description, "children": children or []}
+    if number:
+        item["number"] = number
+    return item
+
+
+def _toc_child(item_id: str, title: str, description: str, *, number: str = "") -> dict[str, str]:
+    item = {"id": item_id, "title": title, "description": description}
+    if number:
+        item["number"] = number
+    return item
 
 
 def _reference_counts_table(summary: dict[str, Any]) -> str:
@@ -275,12 +481,12 @@ def _hypothetical_panel(summary: dict[str, Any]) -> str:
     if not scenario.get("is_hypothetical"):
         return ""
     return f"""
-<section class="panel">
+<section class="panel report-block" id="hipotetico-medicoes">
   <h2>Medições sintéticas da água do TAR</h2>
   <p>O cenário hipotético parte dos valores medidos de entrada da planilha e gera {scenario['measurement_count']} medições sintéticas por radionuclídeo, com seed {scenario['seed']}. Esses valores representam uma série simulada de resultados de espectrometria gama da água do TAR e alimentam novas simulações dos compartimentos ambientais.</p>
   {_hypothetical_measurements_table(summary)}
 </section>
-<section class="panel">
+<section class="panel report-block" id="hipotetico-inferencia">
   <h2>Teste estatístico do cenário hipotético</h2>
   <p>{escape(scenario.get('statistical_text') or '')}</p>
   {_hypothetical_tests_table(summary)}
@@ -888,16 +1094,715 @@ def _empirical_activity_panel(summary: dict[str, Any]) -> str:
         return ""
     unmodeled = ", ".join(empirical.get("unmodeled_radionuclides") or []) or "nenhum"
     return f"""
-<section class="panel">
+<section class="panel report-block" id="dados-reais-tar">
   <h2>Dados reais de atividade total TAR</h2>
-  <p>{escape(empirical.get('narrative_text') or '')}</p>
-  <p>A estatística inferencial desta seção usa somente amostras reais do TAR - Afluente calculadas pela fórmula; o Report Level permanece referência fixa.</p>
-  <p class="table-note">Fonte: {escape(str(empirical.get('source_workbook_path') or ''))}, aba {escape(str(empirical.get('source_sheet') or ''))}. Radionuclídeos observados não modelados: {escape(unmodeled)}.</p>
-  <div class="cards sensitivity-cards">{_empirical_cards(empirical)}</div>
-  {_empirical_group_table(empirical)}
-  {_empirical_radionuclide_table(empirical)}
-  {_empirical_modeled_table(empirical)}
-  {_empirical_inferential_table(empirical)}
+  <article class="report-block-child" id="dados-reais-entrada">
+    <h3>Entrada e organização das amostras</h3>
+    <p>{escape(empirical.get('narrative_text') or '')}</p>
+    <p class="table-note">Fonte: {escape(str(empirical.get('source_workbook_path') or ''))}, aba {escape(str(empirical.get('source_sheet') or ''))}. Radionuclídeos observados não modelados: {escape(unmodeled)}.</p>
+    <div class="cards sensitivity-cards">{_empirical_cards(empirical)}</div>
+    {_empirical_group_table(empirical)}
+    {_empirical_radionuclide_table(empirical)}
+  </article>
+  <article class="report-block-child" id="dados-reais-calculos">
+    <h3>Cálculos por fórmula a partir dos dados reais</h3>
+    <p>Este bloco aplica a mesma lógica da planilha TAR às amostras reais, separando radionuclídeo e compartimento ambiental.</p>
+    {_empirical_modeled_table(empirical)}
+  </article>
+  <article class="report-block-child" id="dados-reais-inferencia">
+    <h3>Inferência com dados reais contra Report Level</h3>
+    <p>A estatística inferencial desta seção usa somente amostras reais do TAR - Afluente calculadas pela fórmula; o Report Level permanece referência fixa.</p>
+    {_empirical_inferential_table(empirical)}
+  </article>
+</section>
+"""
+
+
+def _total_activity_review_cards(review: dict[str, Any]) -> str:
+    return "".join(
+        f'<div class="card"><span>{escape(str(card.get("label") or ""))}</span><strong>{escape(str(card.get("value") or "—"))}</strong></div>'
+        for card in review.get("cards") or []
+    )
+
+
+def _total_activity_top15_table(review: dict[str, Any]) -> str:
+    rows = []
+    for item in review.get("top15_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(item.get('rank') or '—'))}</td>"
+            f"<td>{escape(item.get('date') or '')}</td>"
+            f"<td>{escape(item.get('activity_total_text') or '—')}</td>"
+            f"<td>{escape(item.get('sample_id') or '—')}</td>"
+            f"<td>{escape(item.get('group') or '—')}</td>"
+            f'<td><span class="pill {_status_class("abaixo" if item.get("complete") else "sem referência")}">{escape(item.get("status") or "—")}</span></td>'
+            f"<td>{escape(str(item.get('numeric_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('censored_count') or 0))}</td>"
+            f"<td>{escape(str(item.get('missing_count') or 0))}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Auditoria das 15 maiores atividades totais do tanque",
+        "<tr><th>Rank</th><th>Data</th><th>A-TAR</th><th>Amostra</th><th>Grupo</th><th>Status</th><th>Numéricos</th><th>&lt; MDA</th><th>Ausentes</th></tr>",
+        "".join(rows),
+        review.get("source_note") or "",
+        table_key="total_activity_top15",
+    )
+
+
+def _total_activity_complete_table(review: dict[str, Any]) -> str:
+    rows = []
+    for item in review.get("window_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('anchor_date') or '')}</td>"
+            f"<td>{escape(item.get('window_start_date') or '—')} a {escape(item.get('window_end_date') or '—')}</td>"
+            f"<td>{escape(item.get('window_span_days_text') or '—')}</td>"
+            f"<td>{escape(item.get('activity_total_text') or '—')}</td>"
+            f"<td>{escape(str(item.get('numeric_count') or 0))}</td>"
+            f"<td>{escape(', '.join(item.get('censored_radionuclides') or []) or '—')}</td>"
+            f"<td>{escape(', '.join(item.get('covered_radionuclides') or []) or '—')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Janelas mínimas usadas nos cálculos",
+        "<tr><th>Data âncora</th><th>Janela</th><th>Dias</th><th>A-TAR máx.</th><th>Numéricos</th><th>&lt; MDA</th><th>Radionuclídeos cobertos</th></tr>",
+        "".join(rows),
+        review.get("mda_policy") or "",
+        table_key="total_activity_complete",
+    )
+
+
+def _total_activity_formula_table(review: dict[str, Any]) -> str:
+    rows = []
+    for item in review.get("formula_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('name') or '')}</td>"
+            f"<td>{escape(item.get('symbol') or '')}</td>"
+            f"<td><code>{escape(item.get('formula') or '')}</code></td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Fórmulas aplicadas às linhas completas",
+        "<tr><th>Cálculo</th><th>Símbolo</th><th>Fórmula</th></tr>",
+        "".join(rows),
+        table_key="total_activity_formulas",
+    )
+
+
+def _total_activity_constants_table(review: dict[str, Any]) -> str:
+    rows = []
+    for item in review.get("constant_rows") or []:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.get('radionuclide') or '')}</td>"
+            f"<td>{escape(item.get('scenario_flow_text') or '—')}</td>"
+            f"<td>{escape(item.get('decay_constant_h_text') or '—')}</td>"
+            f"<td>{escape(item.get('half_life_h_text') or '—')}</td>"
+            f"<td>{escape(item.get('bioaccumulation_fish_text') or '—')}</td>"
+            f"<td>{escape(item.get('bioaccumulation_invertebrate_text') or '—')}</td>"
+            f"<td>{escape(item.get('kd_sediment_l_kg_text') or '—')}</td>"
+            f"<td>{escape(item.get('sediment_transfer_factor_text') or '—')}</td>"
+            f"<td>{escape(item.get('sediment_exposure_time_h_text') or '—')}</td>"
+            "</tr>"
+        )
+    return _tar_table(
+        "tar-table--dense",
+        "Constantes e fatores da planilha TAR",
+        "<tr><th>Radionuclídeo</th><th>Vazão</th><th>λ</th><th>Meia-vida</th><th>Bp peixe</th><th>Bp inv.</th><th>Kd</th><th>Fator sed.</th><th>Tempo</th></tr>",
+        "".join(rows),
+        table_key="total_activity_constants",
+    )
+
+
+def _total_activity_matrix_table(review: dict[str, Any]) -> str:
+    source_rows = list(review.get("matrix_rows") or [])
+    grouped_rows = _group_by_radionuclide_matrix(source_rows)
+    summary_rows = []
+    detail_blocks = []
+    for index, ((radionuclide, _compartment_key, compartment), group_rows) in enumerate(grouped_rows):
+        values = _numeric_values(group_rows, "value")
+        summary_rows.append(
+            "<tr>"
+            f"<td>{escape(radionuclide)}</td>"
+            f"<td>{escape(compartment)}</td>"
+            f"<td>{len(group_rows)}</td>"
+            f"<td>{_distinct_count(group_rows, 'anchor_date')}</td>"
+            f"<td>{escape(group_rows[0].get('unit') or '')}</td>"
+            f"<td>{escape(_mean_text(values))}</td>"
+            f"<td>{escape(_min_max_text(values))}</td>"
+            "</tr>"
+        )
+        detail_rows = []
+        for item in group_rows:
+            detail_rows.append(
+                "<tr>"
+                f"<td>{escape(item.get('anchor_date') or '')}</td>"
+                f"<td>{escape(item.get('window_start_date') or '—')} a {escape(item.get('window_end_date') or '—')}</td>"
+                f"<td>{escape(item.get('source_date') or '')}</td>"
+                f"<td>{escape(item.get('source_sample_id') or item.get('sample_id') or '')}</td>"
+                f"<td>{escape(item.get('fraction_text') or '—')}</td>"
+                f"<td>{escape(item.get('activity_bq_text') or '—')}</td>"
+                f"<td>{escape(item.get('value_text') or '—')}</td>"
+                f"<td>{escape(item.get('unit') or '')}</td>"
+                "</tr>"
+            )
+        detail_table = _tar_table(
+            "tar-table--dense tar-table--detail",
+            f"Detalhe calculado - {radionuclide} - {compartment}",
+            "<tr><th>Data âncora</th><th>Janela</th><th>Data fonte</th><th>Amostra fonte</th><th>Si</th><th>Ai</th><th>Resultado</th><th>Unidade</th></tr>",
+            "".join(detail_rows),
+            intro=(
+                f"Esta tabela detalha os cálculos individuais de {radionuclide} em {compartment}. "
+                "Ela mostra a data âncora, a janela usada para localizar o radionuclídeo, a fração Si, a atividade Ai e o resultado final na unidade da matriz."
+            ),
+        )
+        detail_blocks.append(
+            _details_section(
+                f"{radionuclide} - {compartment} ({len(group_rows)} linhas)",
+                detail_table,
+                open_by_default=index == 0,
+            )
+        )
+    summary_table = _tar_table(
+        "tar-table--dense tar-table--summary",
+        "Resultados calculados por data, radionuclídeo e matriz",
+        "<tr><th>Radionuclídeo</th><th>Matriz</th><th>Linhas</th><th>Datas âncora</th><th>Unidade</th><th>Média</th><th>Mín. a máx.</th></tr>",
+        "".join(summary_rows),
+        "Os detalhes ficam separados abaixo por radionuclídeo e matriz. Radionuclídeos < MDA> não geram resultado por matriz porque não entram como valor numérico no denominador.",
+        table_key="total_activity_matrix",
+    )
+    details = "".join(detail_blocks)
+    return f'{summary_table}<div class="tar-subsections"><h3>Detalhes por radionuclídeo e matriz</h3>{details}</div>'
+
+
+def _ratio_domain(values: list[float]) -> tuple[float, float]:
+    positive = [value for value in values if value and value > 0]
+    if not positive:
+        return 0.1, 10.0
+    lower = min([1.0, *positive])
+    upper = max([1.0, *positive])
+    lower_power = math.floor(math.log10(lower))
+    upper_power = math.ceil(math.log10(upper))
+    if lower_power == upper_power:
+        upper_power += 1
+    return 10**lower_power, 10**upper_power
+
+
+def _log_position(value: float, lower: float, upper: float, start: float, size: float, *, invert: bool = False) -> float:
+    safe_value = max(lower, min(upper, value))
+    lower_log = math.log10(lower)
+    upper_log = math.log10(upper)
+    if upper_log <= lower_log:
+        return start
+    ratio = (math.log10(safe_value) - lower_log) / (upper_log - lower_log)
+    return start + (1 - ratio) * size if invert else start + ratio * size
+
+
+def _chart_color(label: str) -> str:
+    palette = {
+        "Água": "#27667b",
+        "Peixe": "#2d8577",
+        "Invertebrado": "#9b6a2f",
+        "Sedimento": "#6b4aa0",
+    }
+    return palette.get(label, "#52616a")
+
+
+def _erica_chart_scopes(review: dict[str, Any]) -> list[dict[str, Any]]:
+    return (review.get("erica_chart_payloads") or {}).get("scope_rows") or []
+
+
+def _erica_ratio_boxplot_svg(review: dict[str, Any]) -> str:
+    scopes = _erica_chart_scopes(review)
+    values: list[float] = []
+    for scope in scopes:
+        stats = scope.get("stats") or {}
+        values.extend(float(stats[key]) for key in ["min", "q1", "median", "q3", "max", "p95"] if stats.get(key) is not None and float(stats[key]) > 0)
+    lower, upper = _ratio_domain(values)
+    width = 860
+    left = 132
+    right = 42
+    top = 58
+    row_height = 54
+    height = top + max(1, len(scopes)) * row_height + 56
+    plot_width = width - left - right
+    ref_x = _log_position(1.0, lower, upper, left, plot_width)
+    parts = [
+        f'<svg class="tar-chart tar-chart--wide" data-chart="erica-boxplot" viewBox="0 0 {width} {height}" role="img" aria-label="Boxplot da razão calculado por fórmulas sobre ERICA Tool">',
+        f'<text x="24" y="24" font-size="16" font-weight="700" fill="#1d252c">Boxplot da razão calculado / ERICA</text>',
+        f'<line x1="{left}" y1="38" x2="{left + plot_width}" y2="38" stroke="#d6ddd9"/>',
+        f'<line x1="{ref_x:.2f}" y1="42" x2="{ref_x:.2f}" y2="{height - 32}" stroke="#b8423a" stroke-width="2" stroke-dasharray="5 5"/>',
+        f'<text x="{ref_x + 6:.2f}" y="54" font-size="11" fill="#b8423a">razão = 1</text>',
+    ]
+    for index, scope in enumerate(scopes):
+        stats = scope.get("stats") or {}
+        y = top + index * row_height
+        label = str(scope.get("scope_label") or "")
+        if not stats.get("n"):
+            continue
+        min_x = _log_position(float(stats["min"]), lower, upper, left, plot_width)
+        q1_x = _log_position(float(stats["q1"]), lower, upper, left, plot_width)
+        median_x = _log_position(float(stats["median"]), lower, upper, left, plot_width)
+        q3_x = _log_position(float(stats["q3"]), lower, upper, left, plot_width)
+        max_x = _log_position(float(stats["max"]), lower, upper, left, plot_width)
+        p95_x = _log_position(float(stats["p95"]), lower, upper, left, plot_width)
+        color = _chart_color(label)
+        parts.extend(
+            [
+                f'<text x="24" y="{y + 19}" font-size="12" fill="#1d252c">{escape(label)} (n={escape(str(scope.get("n") or 0))})</text>',
+                f'<line x1="{min_x:.2f}" y1="{y + 18}" x2="{max_x:.2f}" y2="{y + 18}" stroke="{color}" stroke-width="2"/>',
+                f'<line x1="{min_x:.2f}" y1="{y + 8}" x2="{min_x:.2f}" y2="{y + 28}" stroke="{color}" stroke-width="2"/>',
+                f'<line x1="{max_x:.2f}" y1="{y + 8}" x2="{max_x:.2f}" y2="{y + 28}" stroke="{color}" stroke-width="2"/>',
+                f'<rect x="{q1_x:.2f}" y="{y + 4}" width="{max(3, q3_x - q1_x):.2f}" height="28" fill="#eef7f3" stroke="{color}" stroke-width="2"/>',
+                f'<line x1="{median_x:.2f}" y1="{y + 4}" x2="{median_x:.2f}" y2="{y + 32}" stroke="#1d252c" stroke-width="3"/>',
+                f'<circle cx="{p95_x:.2f}" cy="{y + 18}" r="4" fill="#6b4aa0"/>',
+                f'<text x="{left + plot_width - 150}" y="{y + 42}" font-size="10" fill="#52616a">mediana {escape(stats.get("median_text") or "—")} | P95 {escape(stats.get("p95_text") or "—")}</text>',
+            ]
+        )
+    parts.append(f'<text x="{left + plot_width / 2}" y="{height - 8}" text-anchor="middle" font-size="11" fill="#1d252c">Escala log10 da razão calculado / ERICA</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _erica_ratio_scatter_svg(scope: dict[str, Any]) -> str:
+    points = [point for point in scope.get("points") or [] if point.get("ratio") is not None and float(point["ratio"]) > 0]
+    ratios = [float(point["ratio"]) for point in points]
+    lower, upper = _ratio_domain(ratios)
+    dates = sorted({str(point.get("date") or "") for point in points})
+    date_index = {date: index for index, date in enumerate(dates)}
+    width = 860
+    height = 330
+    left = 74
+    right = 30
+    top = 48
+    bottom = 62
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    ref_y = _log_position(1.0, lower, upper, top, plot_height, invert=True)
+    parts = [
+        f'<svg class="tar-chart tar-chart--wide" data-chart="erica-scatter-{escape(str(scope.get("scope_key") or ""))}" viewBox="0 0 {width} {height}" role="img" aria-label="Dispersão temporal da razão calculado sobre ERICA">',
+        f'<text x="24" y="24" font-size="15" font-weight="700" fill="#1d252c">{escape(str(scope.get("scope_label") or ""))}: pontos da razão calculado / ERICA</text>',
+        f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fbfdfc" stroke="#d6ddd9"/>',
+        f'<line x1="{left}" y1="{ref_y:.2f}" x2="{left + plot_width}" y2="{ref_y:.2f}" stroke="#b8423a" stroke-width="2" stroke-dasharray="5 5"/>',
+        f'<text x="{left + 8}" y="{ref_y - 6:.2f}" font-size="11" fill="#b8423a">razão = 1</text>',
+    ]
+    if len(dates) <= 1:
+        x_at = lambda _date: left + plot_width / 2
+    else:
+        x_at = lambda date: left + (date_index.get(str(date), 0) / (len(dates) - 1)) * plot_width
+    for point in points:
+        ratio = float(point["ratio"])
+        cx = x_at(point.get("date"))
+        cy = _log_position(ratio, lower, upper, top, plot_height, invert=True)
+        color = _chart_color(str(point.get("compartment") or scope.get("scope_label") or ""))
+        stroke = "#1d252c" if point.get("erica_generated") else color
+        fill = "#ffffff" if point.get("erica_generated") else color
+        parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="3.2" fill="{fill}" stroke="{stroke}" stroke-width="1">'
+            f'<title>{escape(str(point.get("date") or ""))} | {escape(str(point.get("radionuclide") or ""))} | {escape(str(point.get("compartment") or ""))}: {escape(str(point.get("ratio_text") or "—"))}</title></circle>'
+        )
+    if dates:
+        parts.extend(
+            [
+                f'<text x="{left}" y="{height - 30}" font-size="10" fill="#52616a">{escape(dates[0])}</text>',
+                f'<text x="{left + plot_width}" y="{height - 30}" text-anchor="end" font-size="10" fill="#52616a">{escape(dates[-1])}</text>',
+            ]
+        )
+    parts.extend(
+        [
+            f'<text x="{left + plot_width / 2}" y="{height - 8}" text-anchor="middle" font-size="11" fill="#1d252c">Data da amostra</text>',
+            f'<text x="18" y="{top + plot_height / 2}" transform="rotate(-90 18 {top + plot_height / 2})" text-anchor="middle" font-size="11" fill="#1d252c">log10(calculado / ERICA)</text>',
+            "</svg>",
+        ]
+    )
+    return "".join(parts)
+
+
+def _erica_ratio_heatmap_svg(review: dict[str, Any]) -> str:
+    heatmap = (review.get("erica_chart_payloads") or {}).get("heatmap") or {}
+    radionuclides = heatmap.get("radionuclides") or []
+    compartments = heatmap.get("compartments") or []
+    cells = {(cell.get("radionuclide"), cell.get("compartment_key")): cell for cell in heatmap.get("cells") or []}
+    cell_width = 150
+    cell_height = 34
+    left = 100
+    top = 56
+    width = left + len(compartments) * cell_width + 32
+    height = top + len(radionuclides) * cell_height + 40
+
+    def color_for(value: Any) -> str:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "#eef2f4"
+        if numeric < 0.5:
+            return "#dceaf3"
+        if numeric < 1:
+            return "#e8f3ee"
+        if numeric < 5:
+            return "#f2d27a"
+        if numeric < 50:
+            return "#df8a4a"
+        return "#b8423a"
+
+    parts = [
+        f'<svg class="tar-chart tar-chart--wide" data-chart="erica-heatmap" viewBox="0 0 {width} {height}" role="img" aria-label="Heatmap da mediana da razão calculado sobre ERICA">',
+        '<text x="24" y="24" font-size="15" font-weight="700" fill="#1d252c">Mediana da razão calculado / ERICA por radionuclídeo e matriz</text>',
+    ]
+    for col, compartment in enumerate(compartments):
+        x = left + col * cell_width
+        parts.append(f'<text x="{x + cell_width / 2}" y="46" text-anchor="middle" font-size="11" fill="#1d252c">{escape(str(compartment.get("label") or ""))}</text>')
+    for row_index, radionuclide in enumerate(radionuclides):
+        y = top + row_index * cell_height
+        parts.append(f'<text x="24" y="{y + 21}" font-size="11" fill="#1d252c">{escape(str(radionuclide))}</text>')
+        for col, compartment in enumerate(compartments):
+            x = left + col * cell_width
+            cell = cells.get((radionuclide, compartment.get("key"))) or {}
+            value = cell.get("median_ratio")
+            parts.append(
+                f'<rect x="{x}" y="{y}" width="{cell_width - 8}" height="{cell_height - 6}" rx="3" fill="{color_for(value)}" stroke="#ffffff"/>'
+                f'<text x="{x + (cell_width - 8) / 2}" y="{y + 19}" text-anchor="middle" font-size="10" fill="#1d252c">{escape(str(cell.get("median_ratio_text") or "—"))}</text>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _chart_reading_html(text: str) -> str:
+    return f'<p class="chart-reading">{escape(text)}</p>'
+
+
+def _erica_scatter_reading(scope: dict[str, Any]) -> str:
+    label = str(scope.get("scope_label") or "Escopo")
+    generated_count = int(scope.get("generated_erica_count") or 0)
+    generated_text = (
+        f"Neste escopo há {generated_count} ponto(s) com ERICA gerado por stat_seed; por isso a leitura desses pontos é exploratória."
+        if generated_count
+        else "Quando houver ERICA gerado por stat_seed, a leitura desses pontos deve ser tratada como exploratória."
+    )
+    return (
+        f"{label}: cada ponto representa um par data/radionuclídeo/matriz da razão calculado/ERICA. "
+        "A linha vermelha em razão = 1 marca equivalência; pontos acima indicam concentração calculada maior que ERICA "
+        f"e pontos abaixo indicam concentração calculada menor que ERICA. {generated_text}"
+    )
+
+
+def _total_activity_erica_graphs(review: dict[str, Any]) -> str:
+    payload = review.get("erica_chart_payloads") or {}
+    scopes = payload.get("scope_rows") or []
+    if not scopes:
+        return ""
+    scatter_blocks = "".join(
+        f'<article><h4>{escape(str(scope.get("scope_label") or ""))}</h4>{_chart_reading_html(_erica_scatter_reading(scope))}{_erica_ratio_scatter_svg(scope)}</article>'
+        for scope in scopes
+    )
+    return f"""
+<div class="explain-box">
+  <p>{escape(payload.get('explanation') or '')}</p>
+  <p>Os gráficos complementam os testes inferenciais: o boxplot mostra a distribuição das razões, a dispersão temporal mostra cada par por data e a linha vermelha em razão = 1 marca equivalência entre concentração calculada por fórmulas e ERICA Tool.</p>
+</div>
+<div class="chart-grid">
+  <article>
+    <h4>Boxplot por escopo</h4>
+    {_chart_reading_html("O boxplot resume a razão calculado/ERICA por escopo. A caixa mostra os 50% centrais, a linha interna é a mediana, as hastes mostram mínimo e máximo, o ponto roxo marca o P95 e a escala log10 evita que valores extremos escondam diferenças próximas da equivalência. A linha vermelha em razão = 1 indica igualdade entre fórmula e ERICA; deslocamentos à direita indicam valores calculados maiores.")}
+    {_erica_ratio_boxplot_svg(review)}
+  </article>
+  <article>
+    <h4>Heatmap por radionuclídeo e matriz</h4>
+    {_chart_reading_html("O heatmap mostra a mediana da razão calculado/ERICA para cada radionuclídeo e matriz. Células claras indicam medianas menores ou próximas de 1; células mais quentes indicam medianas acima de 1, ou seja, cálculo por fórmula maior que ERICA naquele cruzamento. Valores abaixo de 1 indicam cálculo menor que ERICA.")}
+    {_erica_ratio_heatmap_svg(review)}
+  </article>
+  {scatter_blocks}
+</div>
+"""
+
+
+def _total_activity_erica_table(review: dict[str, Any]) -> str:
+    source_rows = list(review.get("erica_pair_rows") or [])
+    grouped_rows = _group_by_radionuclide_matrix(source_rows)
+    summary_rows = []
+    detail_blocks = []
+    for index, ((radionuclide, _compartment_key, compartment), group_rows) in enumerate(grouped_rows):
+        calculated_values = _numeric_values(group_rows, "calculated_value")
+        erica_values = _numeric_values(group_rows, "erica_value")
+        ratio_values = _numeric_values(group_rows, "ratio")
+        generated_count = sum(1 for item in group_rows if item.get("erica_generated"))
+        summary_rows.append(
+            "<tr>"
+            f"<td>{escape(radionuclide)}</td>"
+            f"<td>{escape(compartment)}</td>"
+            f"<td>{len(group_rows)}</td>"
+            f"<td>{_distinct_count(group_rows, 'date')}</td>"
+            f"<td>{escape(group_rows[0].get('unit') or '')}</td>"
+            f"<td>{escape(_mean_text(calculated_values))}</td>"
+            f"<td>{escape(_mean_text(erica_values))}</td>"
+            f"<td>{escape(_min_max_text(ratio_values))}</td>"
+            f"<td>{generated_count}</td>"
+            "</tr>"
+        )
+        detail_rows = []
+        for item in group_rows:
+            detail_rows.append(
+                "<tr>"
+                f"<td>{escape(item.get('date') or '')}</td>"
+                f"<td>{escape(item.get('sample_id') or '')}</td>"
+                f"<td>{escape(item.get('calculated_value_text') or '—')}</td>"
+                f"<td>{escape(item.get('erica_value_text') or '—')}</td>"
+                f"<td>{escape(item.get('ratio_text') or '—')}</td>"
+                f"<td>{escape(item.get('erica_source') or '')}</td>"
+                "</tr>"
+            )
+        detail_table = _tar_table(
+            "tar-table--dense tar-table--detail",
+            f"Detalhe calculado vs ERICA - {radionuclide} - {compartment}",
+            "<tr><th>Data</th><th>Amostra</th><th>Calculado</th><th>ERICA</th><th>Calculado/ERICA</th><th>Origem ERICA</th></tr>",
+            "".join(detail_rows),
+            intro=(
+                f"Esta tabela detalha os pares calculado/ERICA de {radionuclide} em {compartment}. "
+                "Ela permite verificar, linha a linha, o valor calculado por fórmula, o valor ERICA usado e a razão entre os dois."
+            ),
+        )
+        detail_blocks.append(
+            _details_section(
+                f"{radionuclide} - {compartment} ({len(group_rows)} pares)",
+                detail_table,
+                open_by_default=index == 0,
+            )
+        )
+    summary_table = _tar_table(
+        "tar-table--dense tar-table--summary",
+        "Pares calculado vs ERICA Tool",
+        "<tr><th>Radionuclídeo</th><th>Matriz</th><th>Pares</th><th>Datas</th><th>Unidade</th><th>Média calculada</th><th>Média ERICA</th><th>Razão mín. a máx.</th><th>Nº ERICA gerado</th></tr>",
+        "".join(summary_rows),
+        "Os pares detalhados ficam separados abaixo por radionuclídeo e matriz. A coluna 'Nº ERICA gerado' conta quantos pares usaram valor ERICA reproduzido por stat_seed; zero significa que todos os valores ERICA daquele grupo vieram da base disponível.",
+        table_key="total_activity_erica",
+    )
+    details = "".join(detail_blocks)
+    return f'{summary_table}<div class="tar-subsections"><h3>Detalhes dos pares ERICA</h3>{details}</div>'
+
+
+def _total_activity_norm_table(review: dict[str, Any]) -> str:
+    source_rows = list(review.get("norm_comparison_rows") or [])
+    grouped_rows = _group_by_radionuclide_matrix(source_rows)
+    summary_rows = []
+    detail_blocks = []
+    for index, ((radionuclide, _compartment_key, compartment), group_rows) in enumerate(grouped_rows):
+        ratio_values = _numeric_values(group_rows, "ratio")
+        references = ", ".join(sorted({str(item.get("reference") or "") for item in group_rows if item.get("reference")}))
+        exceedance_count = sum(1 for item in group_rows if item.get("status") == "acima")
+        summary_rows.append(
+            "<tr>"
+            f"<td>{escape(radionuclide)}</td>"
+            f"<td>{escape(compartment)}</td>"
+            f"<td>{escape(references or '—')}</td>"
+            f"<td>{len(group_rows)}</td>"
+            f"<td>{_distinct_count(group_rows, 'date')}</td>"
+            f"<td>{escape(_min_max_text(ratio_values))}</td>"
+            f"<td>{exceedance_count}</td>"
+            "</tr>"
+        )
+        detail_rows = []
+        for item in group_rows:
+            detail_rows.append(
+                "<tr>"
+                f"<td>{escape(item.get('date') or '')}</td>"
+                f"<td>{escape(item.get('sample_id') or '')}</td>"
+                f"<td>{escape(item.get('reference') or '')}</td>"
+                f"<td>{escape(item.get('value_text') or '—')}</td>"
+                f"<td>{escape(item.get('reference_value_text') or '—')}</td>"
+                f"<td>{escape(item.get('ratio_text') or '—')}</td>"
+                f'<td><span class="pill {_status_class(str(item.get("status") or ""))}">{escape(item.get("status") or "—")}</span></td>'
+                "</tr>"
+            )
+        detail_table = _tar_table(
+            "tar-table--dense tar-table--detail",
+            f"Detalhe normativo - {radionuclide} - {compartment}",
+            "<tr><th>Data</th><th>Amostra</th><th>Referência</th><th>Valor</th><th>Referência</th><th>Razão</th><th>Status</th></tr>",
+            "".join(detail_rows),
+            intro=(
+                f"Esta tabela detalha a comparação normativa de {radionuclide} em {compartment}. "
+                "Cada linha compara o valor calculado com Report Level ou LLD e registra a razão e o status correspondente."
+            ),
+        )
+        detail_blocks.append(
+            _details_section(
+                f"{radionuclide} - {compartment} ({len(group_rows)} comparações)",
+                detail_table,
+                open_by_default=index == 0,
+            )
+        )
+    summary_table = _tar_table(
+        "tar-table--dense tar-table--summary",
+        "Comparação com Report Level e LLD por linha completa",
+        "<tr><th>Radionuclídeo</th><th>Matriz</th><th>Referências</th><th>Comparações</th><th>Datas</th><th>Razão mín. a máx.</th><th>Acima</th></tr>",
+        "".join(summary_rows),
+        "Os detalhes ficam separados abaixo por radionuclídeo e matriz. LLD é referência de detecção e não limite de ação.",
+        table_key="total_activity_norms",
+    )
+    details = "".join(detail_blocks)
+    return f'{summary_table}<div class="tar-subsections"><h3>Detalhes normativos</h3>{details}</div>'
+
+
+def _total_activity_inferential_table(review: dict[str, Any]) -> str:
+    source_rows = list(review.get("inferential_rows") or [])
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in source_rows:
+        group_type = str(item.get("group_type") or "Radionuclídeo-matriz")
+        grouped.setdefault((str(item.get("comparison_type") or ""), group_type), []).append(item)
+    group_order = {"Geral": 0, "Matriz": 1, "Radionuclídeo": 2, "Radionuclídeo-matriz": 3}
+    grouped_rows = sorted(grouped.items(), key=lambda item: (item[0][0], group_order.get(item[0][1], 9), item[0][1]))
+    summary_rows = []
+    detail_blocks = []
+    for index, ((comparison_type, group_type), group_rows) in enumerate(grouped_rows):
+        n_values = [int(row.get("n") or 0) for row in group_rows if row.get("n")]
+        p_values = _numeric_values(group_rows, "p_value")
+        tests = ", ".join(sorted({str(row.get("test_label") or "") for row in group_rows if row.get("test_label")}))
+        generated_count = sum(int(row.get("generated_erica_count") or 0) for row in group_rows)
+        n_text = f"{min(n_values)} a {max(n_values)}" if n_values else "—"
+        p_text = _format_sci(min(p_values)) if p_values else "—"
+        summary_rows.append(
+            "<tr>"
+            f"<td>{escape(comparison_type)}</td>"
+            f"<td>{escape(group_type)}</td>"
+            f"<td>{len(group_rows)}</td>"
+            f"<td>{escape(n_text)}</td>"
+            f"<td>{escape(tests or '—')}</td>"
+            f"<td>{escape(p_text)}</td>"
+            f"<td>{generated_count}</td>"
+            "</tr>"
+        )
+        detail_rows = []
+        for item in group_rows:
+            summary_value = item.get("median_ratio_text") or item.get("p95_ratio_text") or "—"
+            detail_rows.append(
+                "<tr>"
+                f"<td>{escape(item.get('scope') or '')}</td>"
+                f"<td>{escape(str(item.get('n') or '—'))}</td>"
+                f"<td>{escape(item.get('reference') or '—')}</td>"
+                f"<td>{escape(item.get('shapiro_p_text') or '—')}</td>"
+                f"<td>{escape(item.get('test_label') or '—')}</td>"
+                f"<td>{escape(item.get('p_value_text') or '—')}</td>"
+                f"<td>{escape(summary_value)}</td>"
+                f"<td>{escape(item.get('exceedance_rate_text') or '—')}</td>"
+                f"<td>{escape(item.get('generated_erica_count_text') or '0')}</td>"
+                f"<td>{escape(item.get('conclusion') or item.get('reason') or '')}</td>"
+                "</tr>"
+            )
+        detail_table = _tar_table(
+            "tar-table--dense tar-table--detail",
+            f"Detalhe inferencial - {comparison_type} - {group_type}",
+            "<tr><th>Escopo</th><th>n</th><th>Referência</th><th>Shapiro-Wilk</th><th>Teste</th><th>p-value</th><th>Resumo razão</th><th>Ultrapassagem</th><th>Nº ERICA gerado</th><th>Conclusão</th></tr>",
+            "".join(detail_rows),
+            intro=(
+                f"Esta tabela detalha os testes inferenciais do grupo {group_type} para a comparação {comparison_type}. "
+                "Ela mostra o escopo testado, o n válido, a normalidade, o teste selecionado, o p-value e a conclusão exploratória."
+            ),
+        )
+        detail_blocks.append(
+            _details_section(
+                f"{comparison_type} - {group_type} ({len(group_rows)} testes)",
+                detail_table,
+                open_by_default=index == 0,
+            )
+        )
+    summary_table = _tar_table(
+        "tar-table--dense tar-table--summary",
+        "Testes inferenciais das janelas mínimas",
+        "<tr><th>Comparação</th><th>Grupo</th><th>Testes</th><th>n nos testes</th><th>Procedimentos</th><th>Menor p-value</th><th>Nº ERICA gerado</th></tr>",
+        "".join(summary_rows),
+        "Os p-values e conclusões ficam separados abaixo por grupo. Comparações com LLD são tratadas como referência de detecção. A coluna 'Nº ERICA gerado' conta pares com valor ERICA reproduzido por stat_seed, que entram com ressalva exploratória.",
+        table_key="total_activity_inferential",
+    )
+    details = "".join(detail_blocks)
+    return f'{summary_table}<div class="tar-subsections"><h3>Detalhes inferenciais</h3>{details}</div>'
+
+
+def _academic_methodology_panel(summary: dict[str, Any]) -> str:
+    scenario = summary.get("scenario") or {}
+    review = scenario.get("total_activity_review") or {}
+    source_text = ""
+    if review:
+        source_text = (
+            f" As fontes usadas são: A-TAR em {escape(str(review.get('source_total_workbook_path') or ''))}, "
+            f"aba {escape(str(review.get('source_total_sheet') or ''))}; composição radionuclídica em "
+            f"{escape(str(review.get('source_radionuclide_workbook_path') or ''))}, "
+            f"aba {escape(str(review.get('source_radionuclide_sheet') or ''))}; e constantes/fatores da planilha TAR no cenário selecionado."
+        )
+    return f"""
+<section class="panel report-block" id="metodologia">
+  <h2>Metodologia</h2>
+  <article class="report-block-child" id="metodologia-fontes">
+    <h3>Fontes e cruzamento</h3>
+    <p>O relatório cruza a atividade total do tanque com a composição radionuclídica disponível para datas equivalentes ou próximas. A atividade total define a intensidade do evento avaliado; a composição radionuclídica define a participação de cada radionuclídeo na atividade total usada nos cálculos.{source_text}</p>
+  </article>
+  <article class="report-block-child" id="metodologia-selecao">
+    <h3>Seleção temporal e censura</h3>
+    <p>A análise audita as maiores atividades totais do tanque e, para o cálculo principal, seleciona janelas mínimas que concentrem pelo menos oito radionuclídeos diferentes na data mais próxima possível. Entradas marcadas como &lt; MDA&gt; contam como informação censurada para completude, mas não entram como valor numérico no denominador das frações.</p>
+  </article>
+  <article class="report-block-child" id="metodologia-formulas">
+    <h3>Fórmulas de concentração</h3>
+    <p>Para cada linha selecionada, calcula-se a fração Si do radionuclídeo, a atividade Ai, a concentração na água pela vazão do cenário e as incorporações em peixes, invertebrados e sedimento pelos fatores registrados na planilha TAR. As constantes de meia-vida, decaimento, bioacumulação, Kd, fator sedimentar e tempo de acumulação são documentadas antes dos resultados por matriz.</p>
+  </article>
+  <article class="report-block-child" id="metodologia-erica">
+    <h3>ERICA Tool</h3>
+    <p>Os valores calculados por fórmula são pareados com valores do ERICA Tool quando disponíveis. Pares ausentes recebem valores reprodutíveis por <code>stat_seed</code>, marcados com asterisco, para permitir comparação exploratória sem confundir esses pontos com saída regulatória definitiva do ERICA.</p>
+  </article>
+  <article class="report-block-child" id="metodologia-estatistica">
+    <h3>Estatística descritiva e inferencial</h3>
+    <p>A estatística descritiva resume médias, medianas, P95 e distribuições gráficas da razão calculado/ERICA. A inferência usa log(calculado/ERICA) em testes pareados e log(valor/referência) para Report Level e LLD, aplicando Shapiro-Wilk e então teste t ou Wilcoxon conforme normalidade. Report Level é critério de notificação; LLD é referência de detecção.</p>
+  </article>
+</section>
+"""
+
+
+def _total_activity_review_panel(summary: dict[str, Any]) -> str:
+    review = (summary.get("scenario") or {}).get("total_activity_review") or {}
+    if not review:
+        return ""
+    return f"""
+<section class="panel report-block" id="atividade-total">
+  <h2>Resultados da atividade total e composição radionuclídica</h2>
+  <article class="report-block-child" id="atividade-total-analise-dados">
+    <h3>Apresentação dos dados</h3>
+    <p>{escape(review.get('narrative_text') or '')}</p>
+    <p class="table-note">Fonte A-TAR: {escape(str(review.get('source_total_workbook_path') or ''))}, aba {escape(str(review.get('source_total_sheet') or ''))}. Fonte radionuclídeos: {escape(str(review.get('source_radionuclide_workbook_path') or ''))}, aba {escape(str(review.get('source_radionuclide_sheet') or ''))}.</p>
+    <div class="cards sensitivity-cards">{_total_activity_review_cards(review)}</div>
+    <p>Este bloco audita as maiores atividades totais do tanque, identifica completude radionuclídica e seleciona as janelas mínimas que concentram pelo menos oito radionuclídeos diferentes na data mais próxima possível.</p>
+    {_total_activity_top15_table(review)}
+    {_total_activity_complete_table(review)}
+  </article>
+  <article class="report-block-child" id="atividade-total-formulas">
+    <h3>Cálculo das concentrações por fórmulas</h3>
+    <p>Este bloco documenta as equações aplicadas aos dados completos e as constantes lidas da aba de cenário selecionada, incluindo vazão, meia-vida, fatores de bioacumulação, Kd, fator sedimentar e tempo de acumulação.</p>
+    {_total_activity_formula_table(review)}
+    {_total_activity_constants_table(review)}
+    <p>Este bloco apresenta água, sedimento, peixes e invertebrados em resumos por radionuclídeo e matriz, com os detalhes separados em blocos recolhíveis.</p>
+    {_total_activity_matrix_table(review)}
+  </article>
+  <article class="report-block-child" id="atividade-total-erica">
+    <h3>Comparação atividade calculada x ERICA Tool</h3>
+    <p>Este bloco pareia cada atividade calculada com o respectivo valor ERICA disponível ou gerado de forma reprodutível, mantendo a marcação dos valores com asterisco para leitura exploratória.</p>
+    {_total_activity_erica_table(review)}
+  </article>
+  <article class="report-block-child" id="atividade-total-descritiva">
+    <h3>Estatística descritiva</h3>
+    <p>Este bloco resume a distribuição da razão calculado/ERICA em boxplots, dispersões temporais e heatmap por radionuclídeo e matriz, usando os mesmos pares apresentados na seção anterior.</p>
+    {_total_activity_erica_graphs(review)}
+  </article>
+  <article class="report-block-child" id="atividade-total-inferencia">
+    <h3>Estatística inferencial</h3>
+    <p>Este bloco reúne os testes sobre log(calculado/ERICA) e log(valor/referência), com Shapiro-Wilk, teste t ou Wilcoxon conforme normalidade, frequências de ultrapassagem e ressalvas metodológicas.</p>
+    {_total_activity_inferential_table(review)}
+  </article>
+  <article class="report-block-child" id="atividade-total-normas">
+    <h3>Comparação com Report Level e LLD</h3>
+    <p>Este bloco separa a leitura normativa: Report Level é tratado como critério de notificação e LLD como referência de detecção, não como limite de ação.</p>
+    {_total_activity_norm_table(review)}
+  </article>
 </section>
 """
 
@@ -909,21 +1814,28 @@ def _statistical_comparison_panel(summary: dict[str, Any]) -> str:
     descriptive_html = _stat_descriptive_table(statistical) if statistical.get("descriptive_rows") else ""
     paired_html = _stat_paired_table(statistical) if statistical.get("paired_comparison_rows") else ""
     return f"""
-<section class="panel">
+<section class="panel report-block" id="estatistica-geral">
   <h2>Estatística calculado vs ERICA vs norma</h2>
-  <p>{escape(statistical.get('narrative_text') or '')}</p>
-  <p class="table-note">Esta seção não usa replicações aleatórias. A norma é referência fixa; os valores do ERICA Tool são estimativas para visualização até substituição por saídas reais.</p>
-  <p>A estatística descritiva resume dispersão, P95 e CV dos valores calculados e estimados por compartimento. A inferência contra norma fica na seção dos dados reais do TAR - Afluente.</p>
-  <h3>Dados calculados por fórmulas</h3>
-  {_stat_source_rows_table(statistical, "calculated_rows", "Dados calculados por fórmulas de transporte/incorporação", "A planilha TAR fornece concentrações calculadas por fórmulas e modelos de transporte para água, peixe, invertebrado e sedimento.")}
-  <h3>Dados simulados pelo ERICA Tool</h3>
-  {_stat_source_rows_table(statistical, "erica_rows", "Dados simulados pelo ERICA Tool", "O ERICA Tool foi usado como estimativa de dose/risco ambiental até o Nível 2. Água foi convertida de Bq/L para Bq/m³ quando necessário.")}
-  <h3>Normas: Report Level e LLD</h3>
-  {_stat_source_rows_table(statistical, "norm_rows", "Normas: Report Level e LLD", "Report Level e LLD são referências normativas fixas e não entram como amostras aleatórias.")}
-  <h3>Estatística descritiva</h3>
-  {descriptive_html}
-  <h3>Comparação pareada com ERICA Tool</h3>
-  {paired_html}
+  <article class="report-block-child" id="estatistica-metodologia">
+    <h3>Metodologia estatística complementar</h3>
+    <p>{escape(statistical.get('narrative_text') or '')}</p>
+    <p class="table-note">Esta seção não usa replicações aleatórias. A norma é referência fixa; os valores do ERICA Tool são estimativas para visualização até substituição por saídas reais.</p>
+    <p>A estatística descritiva resume dispersão, P95 e CV dos valores calculados e estimados por compartimento. A inferência contra norma fica na seção dos dados reais do TAR - Afluente.</p>
+  </article>
+  <article class="report-block-child" id="estatistica-fontes">
+    <h3>Fontes comparadas: cálculo, ERICA e normas</h3>
+    {_stat_source_rows_table(statistical, "calculated_rows", "Dados calculados por fórmulas de transporte/incorporação", "A planilha TAR fornece concentrações calculadas por fórmulas e modelos de transporte para água, peixe, invertebrado e sedimento.")}
+    {_stat_source_rows_table(statistical, "erica_rows", "Dados simulados pelo ERICA Tool", "O ERICA Tool foi usado como estimativa de dose/risco ambiental até o Nível 2. Água foi convertida de Bq/L para Bq/m³ quando necessário.")}
+    {_stat_source_rows_table(statistical, "norm_rows", "Normas: Report Level e LLD", "Report Level e LLD são referências normativas fixas e não entram como amostras aleatórias.")}
+  </article>
+  <article class="report-block-child" id="estatistica-descritiva">
+    <h3>Estatística descritiva</h3>
+    {descriptive_html}
+  </article>
+  <article class="report-block-child" id="estatistica-erica-pareada">
+    <h3>Comparação pareada com ERICA Tool</h3>
+    {paired_html}
+  </article>
 </section>
 """
 
@@ -936,55 +1848,127 @@ def _base_html(title: str, body: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
   <style>
-    :root {{ color-scheme: light; --ink: #17313a; --muted: #607782; --line: #d8e2e6; --soft: #f3f7f8; --accent: #27667b; }}
+    @page {{ size: A4; margin: 1.8cm 1.6cm 1.8cm 1.8cm; }}
+    :root {{
+      color-scheme: light;
+      --ink: #1d252c;
+      --muted: #52616a;
+      --line: #d6ddd9;
+      --line-strong: #3f474d;
+      --soft: #f7fbf9;
+      --accent: #2d8577;
+      --report-font-family: "Times New Roman", Times, serif;
+      --report-body-size: 12pt;
+      --report-table-font-family: "Times New Roman", Times, serif;
+      --report-table-size: 9pt;
+    }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; font-family: Arial, Helvetica, sans-serif; color: var(--ink); background: #f6f8f9; }}
-    main {{ max-width: 1180px; margin: 0 auto; padding: 28px 20px 42px; }}
-    .tar-header {{ display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: 22px; }}
-    h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }}
-    h2 {{ margin: 26px 0 10px; font-size: 18px; letter-spacing: 0; }}
-    h3 {{ margin: 18px 0 8px; font-size: 14px; letter-spacing: 0; }}
-    p {{ line-height: 1.55; margin: 8px 0; }}
+    body {{ margin: 0; font-family: var(--report-font-family); color: var(--ink); background: #e8edf0; font-size: var(--report-body-size); line-height: 1.42; }}
+    main.report-pages {{ max-width: 1020px; margin: 0 auto; padding: 28px 20px 48px; }}
+    .tar-header, .panel {{ width: 210mm; max-width: calc(100vw - 32px); margin: 0 auto 22px; background: #fff; border: 1px solid #cbd4d8; border-radius: 2px; padding: 1.8cm 1.6cm 1.8cm 1.8cm; box-shadow: 0 14px 36px rgba(31, 47, 55, 0.14); }}
+    .tar-header {{ display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }}
+    h1, h2, h3, h4 {{ margin: 0 0 10px; font-family: var(--report-font-family); letter-spacing: 0; }}
+    h1 {{ font-size: 20pt; line-height: 1.2; }}
+    h2 {{ margin-top: 8px; font-size: 15pt; line-height: 1.25; }}
+    h3 {{ margin-top: 18px; font-size: 12.5pt; line-height: 1.25; }}
+    p {{ line-height: 1.42; margin: 8px 0; }}
+    .panel p, .article-text p, .explain-text, .table-note, .column-notes li, .toc-list p, .toc-children span {{ text-align: justify; }}
+    section[id], article[id] {{ scroll-margin-top: 18px; }}
     .scenario-tabs {{ display: flex; gap: 8px; flex-wrap: wrap; }}
-    .scenario-tab {{ display: inline-flex; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; color: var(--accent); text-decoration: none; background: #fff; }}
+    .scenario-tab {{ display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; color: #22675f; text-decoration: none; background: #fff; font-size: 10.5pt; }}
     .scenario-tab.selected {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
-    .panel {{ background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin: 14px 0; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
-    .card {{ background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }}
-    .card strong {{ display: block; font-size: 24px; margin-top: 6px; }}
+    .card {{ background: var(--soft); border: 1px solid var(--line); border-radius: 2px; padding: 12px; }}
+    .card strong {{ display: block; font-size: 16pt; margin-top: 4px; }}
     .muted-text {{ color: var(--muted); }}
-    .tar-table {{ width: 100%; border-collapse: collapse; margin-top: 12px; background: #fff; }}
-    .tar-table caption {{ caption-side: top; text-align: left; font-weight: bold; color: #203f49; padding: 0 0 7px; }}
-    .tar-table th, .tar-table td {{ border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }}
-    .tar-table th {{ background: #eaf1f3; color: #203f49; font-size: 13px; }}
-    .tar-table th span {{ display: block; color: var(--muted); font-weight: normal; font-size: 11px; }}
-    .tar-table--dense th, .tar-table--dense td {{ font-size: 12px; }}
-    .pill {{ display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 12px; border: 1px solid var(--line); }}
+    .toc-panel p {{ color: #1d252c; }}
+    .toc-list {{ margin: 12px 0 0; padding-left: 0; list-style: none; display: grid; gap: 12px; counter-reset: toc; }}
+    .toc-list > li {{ border-top: 1px solid var(--line); padding-top: 10px; }}
+    .toc-title {{ display: inline-flex; align-items: baseline; gap: 8px; color: #1d252c; font-weight: 700; text-decoration: none; }}
+    .toc-title:hover, .toc-children a:hover {{ text-decoration: underline; }}
+    .toc-number {{ display: inline-flex; justify-content: center; min-width: 22px; color: #1d252c; font-family: var(--report-font-family); font-weight: 700; }}
+    .toc-list p {{ margin: 4px 0 0 30px; font-size: 10.5pt; }}
+    .toc-children {{ margin: 8px 0 0 30px; padding-left: 0; list-style: none; display: grid; gap: 5px; }}
+    .toc-children li {{ padding-left: 2px; }}
+    .toc-children a {{ display: inline-flex; align-items: baseline; gap: 8px; color: #1d252c; font-weight: 700; text-decoration: none; }}
+    .toc-children span {{ display: block; color: #1d252c; font-size: 10pt; line-height: 1.35; }}
+    .report-block-child {{ border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }}
+    .report-block-child:first-of-type {{ border-top: 0; margin-top: 8px; padding-top: 0; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; margin: 10px 0 0; }}
+    .table-scroll--fit {{ overflow-x: visible; }}
+    .tar-table {{ width: auto; max-width: 100%; margin: 0 auto; border-collapse: collapse; table-layout: auto; border: 1.25px solid var(--line-strong); background: #fff; }}
+    .tar-table caption {{ caption-side: top; text-align: center; font-weight: 700; color: #1d252c; padding: 0 0 7px; font-size: 11pt; line-height: 1.3; }}
+    .tar-table th, .tar-table td {{ border: 1px dotted #5a6369; padding: 6px 9px; text-align: center; vertical-align: middle; font-size: var(--report-table-size); font-family: var(--report-table-font-family); line-height: 1.24; white-space: normal; overflow-wrap: break-word; word-wrap: break-word; word-break: normal; }}
+    .tar-table th {{ background: #f8f8f8; color: #1d252c; font-weight: 700; border-bottom: 1.6px solid var(--line-strong); }}
+    .tar-table thead tr:first-child th {{ border-top: 1.25px solid var(--line-strong); }}
+    .tar-table tbody tr:first-child td {{ border-top: 1.6px solid var(--line-strong); }}
+    .tar-table tbody tr:last-child td {{ border-bottom: 1.25px solid var(--line-strong); }}
+    .tar-table tr > :first-child {{ border-left: 1.25px solid var(--line-strong); }}
+    .tar-table tr > :last-child {{ border-right: 1.25px solid var(--line-strong); }}
+    .tar-table th span {{ display: block; color: var(--muted); font-weight: normal; font-size: 8.5pt; }}
+    .tar-table--dense th, .tar-table--dense td {{ font-size: var(--report-table-size); }}
+    .tar-table--wide {{ width: auto; max-width: 100%; table-layout: auto; }}
+    .tar-table--fit {{ width: 100%; max-width: 100%; table-layout: fixed; }}
+    .tar-table--fit th, .tar-table--fit td {{ padding: 3px 4px; font-size: 7pt; line-height: 1.1; white-space: normal; overflow-wrap: anywhere; word-wrap: break-word; word-break: normal; }}
+    .tar-table--fit caption {{ font-size: 10pt; }}
+    .tar-table--fit .pill {{ max-width: 100%; white-space: normal; overflow-wrap: anywhere; justify-content: center; line-height: 1.05; padding: 2px 5px; }}
+    .tar-table--summary {{ margin-bottom: 8px; }}
+    .tar-table--detail caption {{ font-size: 10pt; }}
+    .pill {{ display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 9pt; border: 1px solid var(--line); }}
     .pill.good {{ background: #edf8f0; color: #1f6b3a; border-color: #bfdfc8; }}
     .pill.bad {{ background: #fff0f0; color: #9a2424; border-color: #e6bbbb; }}
     .pill.muted {{ background: #f4f6f7; color: #607782; }}
-    .explain-text {{ color: #405862; font-size: 13px; line-height: 1.5; margin: 10px 0 8px; }}
+    .explain-text {{ color: #405862; font-size: 10.5pt; line-height: 1.45; margin: 10px 0 8px; }}
     .explain-box {{ border-left: 4px solid var(--accent); background: #f7fafb; padding: 10px 12px; margin: 12px 0; }}
-    .explain-box p {{ color: #405862; font-size: 13px; line-height: 1.5; margin: 6px 0; }}
-    .column-notes-block {{ border-left: 4px solid var(--line); background: #f7fafb; padding: 10px 12px; margin: 10px 0; color: #405862; font-size: 13px; }}
+    .explain-box p {{ color: #405862; font-size: 10.5pt; line-height: 1.45; margin: 6px 0; }}
+    .column-notes-block {{ border-left: 4px solid var(--line); background: #f7fafb; padding: 10px 12px; margin: 10px 0; color: #405862; font-size: 10.5pt; }}
     .column-notes-block strong {{ display: block; color: #203f49; margin-bottom: 4px; }}
     .column-notes {{ margin: 4px 0 0 20px; padding: 0; }}
     .column-notes li {{ margin: 3px 0; line-height: 1.4; }}
-    .table-note {{ margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }}
+    .table-note {{ margin: 6px 0 0; color: var(--muted); font-size: 10pt; line-height: 1.4; }}
+    .table-legend {{ margin: 8px 0 12px; }}
+    .tar-subsections {{ margin-top: 16px; display: grid; gap: 10px; }}
+    .tar-subsection {{ border: 1px solid var(--line); background: #fbfdfc; padding: 0; }}
+    .tar-subsection summary {{ cursor: pointer; padding: 10px 12px; font-family: var(--report-table-font-family); font-size: 10pt; font-weight: 700; color: #203f49; }}
+    .tar-subsection[open] summary {{ border-bottom: 1px solid var(--line); background: #f3f7f5; }}
+    .tar-subsection .table-scroll {{ padding: 0 12px 12px; }}
     .tar-chart {{ width: 100%; max-width: 520px; display: block; margin-top: 10px; }}
+    .tar-chart text {{ font-family: var(--report-font-family); }}
     .tar-chart--wide {{ max-width: 100%; }}
     .sensitivity-chart-grid {{ display: grid; gap: 14px; margin-top: 12px; }}
-    .sensitivity-chart-grid article {{ border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; }}
+    .sensitivity-chart-grid article {{ border: 1px solid var(--line); border-radius: 2px; padding: 12px; overflow-x: auto; }}
     .sensitivity-cards {{ margin: 12px 0; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }}
-    .button {{ display: inline-flex; padding: 9px 12px; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; }}
+    .button {{ display: inline-flex; padding: 8px 12px; border-radius: 2px; background: var(--accent); color: #fff; text-decoration: none; }}
+    .cover-title {{ margin: 22px 0 18px; font-size: 19pt; line-height: 1.35; text-align: center; text-transform: uppercase; }}
+    .cover-label {{ display: block; color: #52616a; font-size: 10pt; text-transform: uppercase; letter-spacing: .06em; text-align: center; }}
+    .cover-meta {{ border: 1px solid var(--line); background: #f7fbf9; padding: 12px 14px; margin-top: 18px; font-size: 10.5pt; }}
+    .chart-grid {{ display: grid; gap: 14px; margin-top: 12px; }}
+    .chart-grid article {{ border: 1px solid var(--line); border-radius: 2px; padding: 12px; overflow-x: visible; background: #fff; }}
+    .chart-grid h4 {{ margin-top: 0; font-size: 11pt; }}
+    .chart-reading {{ color: #405862; font-size: 10pt; line-height: 1.38; margin: 6px 0 10px; text-align: justify; }}
     .article-text h2 {{ margin-top: 20px; }}
     .article-text p {{ text-align: justify; }}
     .article-source {{ font-size: 12px; color: var(--muted); margin-bottom: 12px; }}
-    @media (max-width: 760px) {{ .tar-header {{ display: block; }} .tar-table {{ display: block; overflow-x: auto; }} }}
+    @media (max-width: 760px) {{
+      main.report-pages {{ padding: 12px; }}
+      .tar-header, .panel {{ display: block; padding: 20px 16px; }}
+      .scenario-tabs {{ margin-top: 12px; }}
+    }}
+    @media print {{
+      body {{ background: #fff; margin: 0; }}
+      main.report-pages {{ max-width: none; padding: 0; }}
+      .tar-header, .panel {{ box-shadow: none; border: 0; padding: 0; margin: 0 0 22px; }}
+      .actions, .scenario-tabs {{ display: none; }}
+      .table-scroll {{ overflow: visible; }}
+      .tar-table, .tar-table--wide {{ width: auto !important; max-width: 100% !important; table-layout: auto !important; }}
+      .tar-table--fit {{ width: 100% !important; max-width: 100% !important; table-layout: fixed !important; }}
+      .tar-table--fit th, .tar-table--fit td {{ white-space: normal !important; overflow-wrap: break-word !important; word-wrap: break-word !important; word-break: normal !important; }}
+      .tar-subsection {{ break-inside: avoid-page; page-break-inside: avoid; }}
+    }}
   </style>
 </head>
-<body><main>{body}</main></body>
+<body><main class="report-pages">{body}</main></body>
 </html>"""
 
 
@@ -1011,6 +1995,169 @@ def _summary_intro(summary: dict[str, Any]) -> str:
     )
 
 
+def _activity_total_toc_children() -> list[dict[str, str]]:
+    return [
+        _toc_child("atividade-total-analise-dados", "Apresentação dos dados", "Top 15, completude e janelas mínimas de datas próximas."),
+        _toc_child("atividade-total-formulas", "Concentrações por fórmulas", "Si, Ai, constantes, fatores e resultados por matriz ambiental."),
+        _toc_child("atividade-total-erica", "Calculado x ERICA", "Pares calculados versus ERICA Tool, incluindo valores gerados com asterisco."),
+        _toc_child("atividade-total-descritiva", "Estatística descritiva", "Boxplots, dispersão temporal, heatmap, médias, medianas e P95."),
+        _toc_child("atividade-total-inferencia", "Estatística inferencial", "Shapiro-Wilk, teste t ou Wilcoxon e frequências de ultrapassagem."),
+        _toc_child("atividade-total-normas", "Report Level e LLD", "Comparação normativa, com LLD tratado como referência de detecção."),
+    ]
+
+
+def _methodology_toc_children() -> list[dict[str, str]]:
+    return [
+        _toc_child("metodologia-fontes", "Fontes e cruzamento", "Planilhas usadas e lógica de associação entre A-TAR e radionuclídeos."),
+        _toc_child("metodologia-selecao", "Seleção temporal e censura", "Janelas próximas e tratamento de resultados < MDA>."),
+        _toc_child("metodologia-formulas", "Fórmulas de concentração", "Frações, atividades, matrizes ambientais e constantes."),
+        _toc_child("metodologia-erica", "ERICA Tool", "Pareamento calculado x ERICA e valores gerados por stat_seed."),
+        _toc_child("metodologia-estatistica", "Estatística descritiva e inferencial", "Resumo gráfico, Shapiro-Wilk, teste t, Wilcoxon, Report Level e LLD."),
+    ]
+
+
+def _empirical_toc_children() -> list[dict[str, str]]:
+    return [
+        _toc_child("dados-reais-entrada", "Entrada das amostras", "Afluente, efluente, censura < MDA> e radionuclídeos observados."),
+        _toc_child("dados-reais-calculos", "Cálculos por fórmula", "Aplicação da lógica TAR aos dados reais por compartimento."),
+        _toc_child("dados-reais-inferencia", "Inferência real", "Testes contra Report Level usando amostras reais do TAR - Afluente."),
+    ]
+
+
+def _statistical_toc_children() -> list[dict[str, str]]:
+    return [
+        _toc_child("estatistica-metodologia", "Metodologia estatística", "Premissas da comparação calculado, ERICA e normas."),
+        _toc_child("estatistica-fontes", "Fontes comparadas", "Dados calculados, ERICA Tool, Report Level e LLD."),
+        _toc_child("estatistica-descritiva", "Descritiva", "Dispersão, P95, CV e resumo dos valores."),
+        _toc_child("estatistica-erica-pareada", "Pareamento ERICA", "Comparação pareada entre cálculo por fórmula e ERICA Tool."),
+    ]
+
+
+def _dashboard_toc_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    scenario = summary.get("scenario") or {}
+    items = [
+        _toc_item("introducao", "Introdução e escopo", "Cenário selecionado, radionuclídeos avaliados e atalhos de exportação."),
+    ]
+    if scenario.get("total_activity_review"):
+        items.extend(
+            [
+                _toc_item("metodologia", "Metodologia", "Fontes, cruzamento, seleção temporal, fórmulas, ERICA Tool e testes.", _methodology_toc_children()),
+                _toc_item("atividade-total-analise-dados", "Apresentação dos dados", "Top 15, completude e janelas mínimas de datas próximas."),
+                _toc_item("atividade-total-formulas", "Concentrações por fórmulas", "Constantes, fatores, fórmulas e resultados por matriz ambiental."),
+                _toc_item("atividade-total-erica", "Calculado x ERICA", "Pares calculados versus ERICA Tool, incluindo valores gerados com asterisco."),
+                _toc_item("atividade-total-descritiva", "Estatística descritiva", "Boxplots, dispersão temporal, heatmap, médias, medianas e P95."),
+                _toc_item("atividade-total-inferencia", "Estatística inferencial", "Shapiro-Wilk, teste t ou Wilcoxon, p-values e ressalvas."),
+                _toc_item("atividade-total-normas", "Report Level e LLD", "Report Level como notificação; LLD como referência de detecção."),
+            ]
+        )
+    else:
+        items.extend(
+            [
+                _toc_item("referencias-disponiveis", "Referências disponíveis", "Disponibilidade de Report Level e LLD por matriz ambiental."),
+                _toc_item("concentracoes-cenario", "Concentrações calculadas", "Resultados do cenário selecionado."),
+                _toc_item("comparacao-normativa-cenario", "Comparação normativa inicial", "Comparação direta com Report Level e LLD da planilha TAR."),
+            ]
+        )
+    if scenario.get("is_hypothetical"):
+        items.extend(
+            [
+                _toc_item("hipotetico-medicoes", "Medições sintéticas", "Série hipotética de espectrometria gama por radionuclídeo."),
+                _toc_item("hipotetico-inferencia", "Inferência do cenário hipotético", "Teste estatístico das simulações contra Report Level."),
+            ]
+        )
+    if scenario.get("empirical_activity_statistics"):
+        items.append(
+            _toc_item("dados-reais-tar", "Dados reais TAR", "Organização das amostras reais e inferência contra Report Level.", _empirical_toc_children())
+        )
+    if scenario.get("statistical_comparison"):
+        items.append(
+            _toc_item(
+                "estatistica-geral",
+                "Estatística complementar calculado x ERICA x norma",
+                "Resumo estatístico complementar com dados calculados, ERICA Tool e referências fixas.",
+                _statistical_toc_children(),
+            )
+        )
+    items.append(_toc_item("suficiencia-estatistica", "Discussão e conclusão", "Critérios mínimos, limitações, suficiência estatística e interpretação final."))
+    return items
+
+
+def _report_toc_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    scenario = summary.get("scenario") or {}
+    items = [
+        _toc_item("resumo", "Introdução e escopo", "Escopo do relatório, cenário selecionado e conjunto de radionuclídeos."),
+    ]
+    if scenario.get("total_activity_review"):
+        items.extend(
+            [
+                _toc_item("metodologia", "Metodologia", "Fontes, cruzamento, seleção temporal, fórmulas, ERICA Tool e testes.", _methodology_toc_children()),
+                _toc_item("atividade-total-analise-dados", "Apresentação dos dados", "Top 15, completude e janelas mínimas de datas próximas."),
+                _toc_item("atividade-total-formulas", "Concentrações por fórmulas", "Constantes, fatores, fórmulas e resultados por matriz ambiental."),
+                _toc_item("atividade-total-erica", "Calculado x ERICA", "Pares calculados versus ERICA Tool, incluindo valores gerados com asterisco."),
+                _toc_item("atividade-total-descritiva", "Estatística descritiva", "Boxplots, dispersão temporal, heatmap, médias, medianas e P95."),
+                _toc_item("atividade-total-inferencia", "Estatística inferencial", "Shapiro-Wilk, teste t ou Wilcoxon, p-values e ressalvas."),
+                _toc_item("atividade-total-normas", "Report Level e LLD", "Report Level como notificação; LLD como referência de detecção."),
+            ]
+        )
+    if scenario.get("empirical_activity_statistics"):
+        items.append(
+            _toc_item("dados-reais-tar", "Dados reais TAR", "Amostras reais, cálculos por fórmula e inferência contra Report Level.", _empirical_toc_children())
+        )
+    if not scenario.get("total_activity_review"):
+        items.append(_toc_item("comparacao-normativa-cenario", "Comparação com Report Level e LLD", "Leitura normativa inicial antes da auditoria detalhada por A-TAR."))
+    if scenario.get("statistical_comparison"):
+        items.append(
+            _toc_item(
+                "estatistica-geral",
+                "Estatística complementar",
+                "Dados calculados, ERICA Tool, normas fixas, descritiva e pareamento.",
+                _statistical_toc_children(),
+            )
+        )
+    items.extend(
+        [
+            _toc_item("suficiencia-estatistica", "Discussão e conclusão", "Limitações e critérios mínimos para conclusão inferencial."),
+            _toc_item("exportacao", "Exportação", "Atalhos para DOCX, PDF e ARTIGO BETA."),
+        ]
+    )
+    return items
+
+
+def _article_toc_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    items = [
+        _toc_item("texto-artigo", "Introdução e texto base", "Base editorial importada do arquivo local do Artigo TAR corrigido."),
+    ]
+    scenario = summary.get("scenario") or {}
+    if scenario.get("total_activity_review"):
+        items.extend(
+            [
+                _toc_item("metodologia", "Metodologia", "Fontes, cruzamento, seleção temporal, fórmulas, ERICA Tool e testes.", _methodology_toc_children()),
+                _toc_item("atividade-total", "Resultados da atividade total", "Apresentação dos dados, fórmulas, ERICA, descritiva, inferência e normas.", _activity_total_toc_children()),
+            ]
+        )
+    items.extend(
+        [
+            _toc_item("dados-relatorio", "Dados do relatório TAR", "Resumo técnico incorporado ao artigo beta."),
+            _toc_item("comparacao-normativa-cenario", "Comparação normativa", "Report Level e LLD como referências fixas."),
+        ]
+    )
+    if scenario.get("empirical_activity_statistics"):
+        items.append(
+            _toc_item("dados-reais-tar", "Dados reais TAR", "Amostras reais e inferência contra Report Level.", _empirical_toc_children())
+        )
+    if scenario.get("statistical_comparison"):
+        items.append(
+            _toc_item("estatistica-geral", "Estatística complementar", "Comparação calculado x ERICA x norma e descritiva.", _statistical_toc_children())
+        )
+    items.extend(
+        [
+            _toc_item("suficiencia-estatistica", "Suficiência estatística", "Leitura das limitações estatísticas do conjunto."),
+            _toc_item("acoes", "Ações", "Atalhos para retornar ao TAR ou abrir o relatório."),
+        ]
+    )
+    return items
+
+
 def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
     scenario = summary["scenario"]
     assessment = summary["inferential_assessment"]
@@ -1022,6 +2169,24 @@ def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
         ("Inferência", inferential_label),
     ]
     card_html = "".join(f'<div class="card"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>' for label, value in cards)
+    legacy_reference_sections = ""
+    if not scenario.get("total_activity_review"):
+        legacy_reference_sections = f"""
+<section class="panel report-block" id="referencias-disponiveis">
+  <h2>Referências disponíveis</h2>
+  <p>Água e peixe têm 4 referências disponíveis, sedimento tem 1 referência e invertebrado não tem referência cadastrada na planilha. O Report Level foi tratado como critério de notificação; o LLD permanece como referência de detecção.</p>
+  {_reference_svg(summary)}
+  {_reference_counts_table(summary)}
+</section>
+<section class="panel report-block" id="concentracoes-cenario">
+  <h2>Concentrações calculadas</h2>
+  {_concentration_table(summary)}
+</section>
+<section class="panel report-block" id="comparacao-normativa-cenario">
+  <h2>Comparação com Report Level e LLD</h2>
+  {_reference_result_table(summary)}
+</section>
+"""
     body = f"""
 <div class="tar-header">
   <div>
@@ -1030,34 +2195,25 @@ def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
   </div>
   <nav class="scenario-tabs">{_scenario_tabs(summary['selected_scenario'])}</nav>
 </div>
-<section class="panel">
+{_report_toc(_dashboard_toc_items(summary))}
+<section class="panel report-block" id="introducao">
   <div class="cards">{card_html}</div>
   {_summary_intro(summary)}
   <div class="actions">
     <a class="button" href="/tar/report-preview?{_scenario_query_suffix(summary)}">Abrir relatório TAR</a>
+    <a class="button" href="/tar/export-report.pdf?{_scenario_query_suffix(summary)}">Gerar PDF</a>
     <a class="button" href="/tar/artigo-beta?{_scenario_query_suffix(summary)}">ARTIGO BETA</a>
     <a class="button" href="/api/tar/summary?{_scenario_query_suffix(summary)}">Ver JSON</a>
   </div>
 </section>
-<section class="panel">
-  <h2>Referências disponíveis</h2>
-  <p>Água e peixe têm 4 referências disponíveis, sedimento tem 1 referência e invertebrado não tem referência cadastrada na planilha. O Report Level foi tratado como critério de notificação; o LLD permanece como referência de detecção.</p>
-  {_reference_svg(summary)}
-  {_reference_counts_table(summary)}
-</section>
-<section class="panel">
-  <h2>Concentrações calculadas</h2>
-  {_concentration_table(summary)}
-</section>
-<section class="panel">
-  <h2>Comparação com Report Level e LLD</h2>
-  {_reference_result_table(summary)}
-</section>
+{_academic_methodology_panel(summary)}
+{_total_activity_review_panel(summary)}
+{legacy_reference_sections}
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel">
-  <h2>Suficiência estatística</h2>
+<section class="panel report-block" id="suficiencia-estatistica">
+  <h2>Discussão e conclusão</h2>
   <p>{escape(assessment['reason']) if not scenario.get('is_hypothetical') else 'No cenário hipotético, as medições sintéticas permitem aplicar teste inferencial sobre as razões simulado/Report Level. Para dados reais, a validade do teste depende de medições independentes da água do TAR.'}</p>
   {_minimums_table()}
 </section>
@@ -1068,6 +2224,15 @@ def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
 def render_tar_report_html(summary: dict[str, Any]) -> str:
     assessment = summary["inferential_assessment"]
     scenario = summary["scenario"]
+    legacy_reference_sections = ""
+    if not scenario.get("total_activity_review"):
+        legacy_reference_sections = f"""
+<section class="panel report-block" id="comparacao-normativa-cenario">
+  <h2>Comparação com Report Level e LLD</h2>
+  <p>A comparação com as referências disponíveis não indicou superação de Report Level. O LLD foi mantido como referência de detecção, sem ser tratado como teste inferencial ou limite de ação. Quando a bibliografia consultada não apresenta referência para o compartimento, o resultado foi classificado como sem referência.</p>
+  {_reference_result_table(summary)}
+</section>
+"""
     body = f"""
 <div class="tar-header">
   <div>
@@ -1076,29 +2241,33 @@ def render_tar_report_html(summary: dict[str, Any]) -> str:
   </div>
   <nav class="scenario-tabs">{_scenario_tabs(summary['selected_scenario'], base_path="/tar/artigo-beta")}</nav>
 </div>
-<section class="panel">
+<section class="panel cover-panel" id="capa">
+  <span class="cover-label">Relatório técnico</span>
+  <h1 class="cover-title">{escape(REPORT_FULL_TITLE)}</h1>
+  <p>Relatório do cenário {escape(summary['scenario']['label'])}, com auditoria da atividade total do TAR, cálculos por matriz ambiental, comparação com ERICA Tool e testes inferenciais.</p>
+</section>
+{_report_toc(_report_toc_items(summary))}
+<section class="panel report-block" id="resumo">
   <h2>Resumo</h2>
   {_summary_intro(summary)}
   <p>O conjunto analisado reúne os radionuclídeos {escape(', '.join(summary['scenario']['radionuclides']))}. {'No cenário hipotético, o n se refere ao número de medições sintéticas por radionuclídeo.' if scenario.get('is_hypothetical') else 'O n informado nesta etapa corresponde à quantidade de radionuclídeos do modelo e não deve ser tratado como número de amostras ambientais independentes.'}</p>
 </section>
-<section class="panel">
-  <h2>Comparação com Report Level e LLD</h2>
-  <p>A comparação com as referências disponíveis não indicou superação de Report Level. O LLD foi mantido como referência de detecção, sem ser tratado como teste inferencial ou limite de ação. Quando a bibliografia consultada não apresenta referência para o compartimento, o resultado foi classificado como sem referência.</p>
-  {_reference_result_table(summary)}
-</section>
+{_academic_methodology_panel(summary)}
+{_total_activity_review_panel(summary)}
+{legacy_reference_sections}
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel">
-  <h2>Suficiência estatística</h2>
+<section class="panel report-block" id="suficiencia-estatistica">
+  <h2>Discussão e conclusão</h2>
   <p>{escape(assessment['status'])}: {escape(assessment['reason']) if not scenario.get('is_hypothetical') else 'O cenário hipotético usa medições sintéticas apenas para demonstrar o fluxo estatístico. Para conclusão real, as medições devem vir da espectrometria gama das amostras da água do TAR.'}</p>
   {_minimums_table()}
 </section>
-<section class="panel">
+<section class="panel report-block" id="exportacao">
   <h2>Exportação</h2>
   <div class="actions">
     <a class="button" href="/tar/export-report.docx?{_scenario_query_suffix(summary)}">DOCX</a>
-    <a class="button" href="/tar/export-report.pdf?{_scenario_query_suffix(summary)}">PDF</a>
+    <a class="button" href="/tar/export-report.pdf?{_scenario_query_suffix(summary)}">Gerar PDF</a>
     <a class="button" href="/tar/artigo-beta?{_scenario_query_suffix(summary)}">ARTIGO BETA</a>
   </div>
 </section>
@@ -1116,14 +2285,11 @@ def _load_article_blocks(article_path: str | Path) -> list[dict[str, str]]:
         except Exception as exc:  # pragma: no cover - exercised only when dependency is missing
             raise RuntimeError("A biblioteca PyMuPDF não está disponível para ler o PDF do Artigo TAR.") from exc
         document = fitz.open(path)
-        blocks: list[dict[str, str]] = []
+        lines: list[str] = []
         for page in document:
-            for raw_line in page.get_text("text").splitlines():
-                text = " ".join(raw_line.split())
-                if text:
-                    blocks.append({"text": text, "style": "PDF"})
+            lines.extend(page.get_text("text").splitlines())
         document.close()
-        return blocks
+        return _article_pdf_blocks(lines)
 
     try:
         from docx import Document
@@ -1141,12 +2307,51 @@ def _load_article_blocks(article_path: str | Path) -> list[dict[str, str]]:
     return blocks
 
 
+def _article_heading_level(text: str) -> int | None:
+    stripped = text.strip()
+    if re.match(r"^\d+(\.\d+)*\.\s+\S", stripped):
+        return 1 if re.match(r"^\d+\.\s+\S", stripped) else 2
+    letters = [char for char in stripped if char.isalpha()]
+    if letters and stripped.upper() == stripped and len(stripped) <= 120:
+        return 1
+    return None
+
+
+def _article_pdf_blocks(lines: list[str]) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    paragraph_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        if not paragraph_lines:
+            return
+        text = " ".join(" ".join(line.split()) for line in paragraph_lines).strip()
+        paragraph_lines.clear()
+        if text:
+            blocks.append({"text": text, "style": "PDF Paragraph"})
+
+    for raw_line in lines:
+        text = " ".join((raw_line or "").split())
+        if not text:
+            flush_paragraph()
+            continue
+        heading_level = _article_heading_level(text)
+        if heading_level is not None:
+            flush_paragraph()
+            blocks.append({"text": text, "style": f"PDF Heading {heading_level}"})
+            continue
+        paragraph_lines.append(text)
+        if text.endswith((".", ":", ";", "!", "?")):
+            flush_paragraph()
+    flush_paragraph()
+    return blocks
+
+
 def _article_block_html(block: dict[str, str]) -> str:
     text = block.get("text") or ""
     style = block.get("style") or ""
-    if style.startswith("Heading 1"):
+    if style.startswith("PDF Heading 1") or style.startswith("Heading 1"):
         return f"<h2>{escape(text)}</h2>"
-    if style.startswith("Heading"):
+    if style.startswith("PDF Heading") or style.startswith("Heading"):
         return f"<h3>{escape(text)}</h3>"
     if text.isupper() and len(text) <= 80:
         return f"<h2>{escape(text)}</h2>"
@@ -1157,6 +2362,7 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
     scenario = summary["scenario"]
     article_blocks = _load_article_blocks(article_path)
     article_html = "".join(_article_block_html(block) for block in article_blocks)
+    article_filename = Path(article_path).name
     body = f"""
 <div class="tar-header">
   <div>
@@ -1165,18 +2371,30 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
   </div>
   <nav class="scenario-tabs">{_scenario_tabs(summary['selected_scenario'], base_path="/tar/artigo-beta")}</nav>
 </div>
-<section class="panel">
-  <h2>Texto incorporado do Artigo TAR corrigido</h2>
-  <p class="article-source">Fonte: {escape(str(Path(article_path).name))}. O texto abaixo foi lido diretamente do arquivo local e mantido como base editorial.</p>
-  <p class="table-note">Correção conceitual aplicada no módulo: os valores da planilha são dados calculados por fórmulas; os dados simulados vêm do ERICA Tool; Report Level e LLD são normas fixas de comparação.</p>
+<section class="panel cover-panel" id="capa">
+  <span class="cover-label">Relatório técnico</span>
+  <h1 class="cover-title">{escape(REPORT_FULL_TITLE)}</h1>
+  <p>Este documento organiza os dados do módulo TAR em formato técnico, com separação entre dados calculados por fórmulas, valores simulados ou pareados pelo ERICA Tool, referências normativas e estatística inferencial.</p>
+  <div class="cover-meta">
+    <p><strong>Cenário:</strong> {escape(scenario['label'])}</p>
+    <p><strong>Fonte editorial:</strong> {escape(article_filename)}. O texto-base foi lido diretamente do arquivo local e reorganizado para reduzir quebras artificiais de linha.</p>
+    <p><strong>Correção conceitual:</strong> os valores da planilha são dados calculados por fórmulas; os dados simulados vêm do ERICA Tool; Report Level e LLD são normas fixas de comparação.</p>
+  </div>
+</section>
+{_report_toc(_article_toc_items(summary))}
+<section class="panel report-block" id="texto-artigo">
+  <h2>Introdução e texto base</h2>
+  <p class="article-source">Fonte: {escape(article_filename)}. O texto abaixo foi incorporado como base editorial e teve linhas quebradas reunidas em parágrafos coerentes.</p>
   <div class="article-text">{article_html}</div>
 </section>
-<section class="panel">
+<section class="panel report-block" id="dados-relatorio">
   <h2>Dados do relatório TAR incorporados</h2>
   {_summary_intro(summary)}
   <p>Esta seção acrescenta ao artigo os resultados gerados no relatório TAR para o cenário {escape(scenario['label'])}. A terminologia distingue dados calculados por fórmulas, dados simulados pelo ERICA Tool e normas: Report Level e LLD.</p>
 </section>
-<section class="panel">
+{_academic_methodology_panel(summary)}
+{_total_activity_review_panel(summary)}
+<section class="panel report-block" id="comparacao-normativa-cenario">
   <h2>Comparação com Report Level e LLD</h2>
   <p>A comparação aproxima o texto do artigo dos resultados quantitativos atuais. Report Level é tratado como critério de notificação; LLD permanece como referência de detecção.</p>
   {_reference_result_table(summary)}
@@ -1184,16 +2402,17 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel">
-  <h2>Suficiência estatística</h2>
+<section class="panel report-block" id="suficiencia-estatistica">
+  <h2>Discussão e conclusão</h2>
   <p>{escape(summary['inferential_assessment']['status'])}: {escape(summary['inferential_assessment']['reason']) if not scenario.get('is_hypothetical') else 'O cenário hipotético usa medições sintéticas apenas para demonstrar o fluxo estatístico. Para conclusão real, as medições devem vir da espectrometria gama das amostras da água do TAR.'}</p>
   {_minimums_table()}
 </section>
-<section class="panel">
+<section class="panel report-block" id="acoes">
   <h2>Ações</h2>
   <div class="actions">
     <a class="button" href="/tar?{_scenario_query_suffix(summary)}">Voltar ao TAR</a>
     <a class="button" href="/tar/report-preview?{_scenario_query_suffix(summary)}">Abrir relatório TAR</a>
+    <a class="button" href="/tar/export-report.pdf?{_scenario_query_suffix(summary)}">Gerar PDF</a>
   </div>
 </section>
 """

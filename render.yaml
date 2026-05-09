@@ -14,5 +14,7 @@ services:
         value: ./Cópia de TAR.xlsx
       - key: TAR_ACTIVITY_WORKBOOK_PATH
         value: ./Atividade Total TAR c radionuclideos.xls
+      - key: TAR_TOTAL_ACTIVITY_WORKBOOK_PATH
+        value: ./Dados Atividade TAR - Jayme (1).xlsx
       - key: TAR_ARTICLE_PATH
         value: ./Artigo TAR1 correção.pdf
