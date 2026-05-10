@@ -138,6 +138,7 @@ def test_api_html_and_exports_include_total_activity_review() -> None:
     payload_response = client.get("/api/tar/summary?scenario=a1&stat_n=10")
     payload = payload_response.get_json()
     review = payload["scenario"]["total_activity_review"]
+    discussion = payload["discussion"]
 
     assert payload_response.status_code == 200
     assert "total_activity_workbook_path" in payload
@@ -153,6 +154,14 @@ def test_api_html_and_exports_include_total_activity_review() -> None:
     ]
     assert chart_payloads["scope_rows"][0]["stats"]["n"] == len(review["erica_pair_rows"])
     assert len(chart_payloads["heatmap"]["cells"]) == 32
+    assert discussion["cs137_sediment"]["radionuclide"] == "Cs-137"
+    assert discussion["cs137_sediment"]["compartment"] == "Sedimento"
+    assert discussion["cs137_sediment"]["p95_report_level_ratio_text"] == "1,4416"
+    assert discussion["cs137_sediment"]["exceedance_rate_text"] == "13,70%"
+    assert any("Nb-95" in item for item in discussion["limitations"])
+    assert "Resultado calculado" in {item["label"] for item in discussion["definitions"]}
+    assert "Resultado observado" in {item["label"] for item in discussion["definitions"]}
+    assert "Referência fixa" in {item["label"] for item in discussion["definitions"]}
 
     dashboard = client.get("/tar?scenario=a1&stat_n=10")
     dashboard_text = dashboard.get_data(as_text=True)
@@ -204,6 +213,24 @@ def test_api_html_and_exports_include_total_activity_review() -> None:
     assert "ERICA gerado por stat_seed" in dashboard_text
     assert "Nº ERICA gerado" in dashboard_text
     assert "zero não significa ERICA igual a zero" in dashboard_text
+    assert "Discussão interpretativa" in dashboard_text
+    assert "Água e Peixe ficaram abaixo do Report Level" in dashboard_text
+    assert "Invertebrado não deve ser declarado como abaixo do Report Level" in dashboard_text
+    assert "Radionuclídeos com maior contribuição" in dashboard_text
+    assert "Caso Cs-137 em sedimento" in dashboard_text
+    assert "P95/RL = 1,4416" in dashboard_text
+    assert "frequência de ultrapassagem de 13,70%" in dashboard_text
+    assert "&lt; MDA&gt;" in dashboard_text
+    assert "Nb-95" in dashboard_text
+    assert "ERICA gerado por stat_seed" in dashboard_text
+    assert "Resultado calculado" in dashboard_text
+    assert "Resultado observado" in dashboard_text
+    assert "Referência fixa" in dashboard_text
+    assert "Conclusão objetiva" in dashboard_text
+    assert "Síntese do método" in dashboard_text
+    assert "Principais achados" in dashboard_text
+    assert "Implicação radiológica" in dashboard_text
+    assert "Recomendação" in dashboard_text
     assert "Tabela 20 - Auditoria das 15 maiores atividades totais do tanque" in dashboard_text
     assert "Tabela 21 - Janelas mínimas usadas nos cálculos" in dashboard_text
     assert "Tabela 24 - Resultados calculados por data, radionuclídeo e matriz" in dashboard_text
@@ -244,6 +271,13 @@ def test_api_html_and_exports_include_total_activity_review() -> None:
         "Discussão e conclusão",
     ]:
         assert title in pdf_source
+    assert "Discussão interpretativa" in pdf_source
+    assert "Caso Cs-137 em sedimento" in pdf_source
+    assert "Conclusão objetiva" in pdf_source
+    docx_source = inspect.getsource(tar_exports._add_docx_discussion_section)
+    assert "Discussão interpretativa" in docx_source
+    assert "Caso Cs-137 em sedimento" in docx_source
+    assert "Conclusão objetiva" in docx_source
     assert pdf_source.index('Paragraph("Metodologia"') < pdf_source.index('Paragraph("Apresentação dos dados"')
     assert pdf_source.index('Paragraph("Calculado x ERICA"') < pdf_source.index('Paragraph("Estatística descritiva"')
     assert pdf_source.index('Paragraph("Estatística inferencial"') < pdf_source.index('Paragraph("Report Level e LLD"')

@@ -2629,6 +2629,197 @@ def _empirical_inferential_assessment(empirical: dict[str, Any]) -> dict[str, An
     }
 
 
+def _build_discussion_summary(
+    scenario: dict[str, Any],
+    inferential_assessment: dict[str, Any],
+) -> dict[str, Any]:
+    empirical = scenario.get("empirical_activity_statistics") or {}
+    review = scenario.get("total_activity_review") or {}
+    modeled_rows = list(empirical.get("modeled_compartment_rows") or [])
+    reference_counts = scenario.get("reference_counts") or {}
+    referenced_rows = [
+        row
+        for row in modeled_rows
+        if row.get("report_level") is not None and row.get("report_level_p95_ratio") is not None
+    ]
+
+    below_compartments: list[str] = []
+    exception_compartments: list[str] = []
+    no_reference_compartments: list[str] = []
+    for compartment in COMPARTMENTS:
+        key = compartment["key"]
+        label = compartment["label"]
+        count = reference_counts.get(key) or {}
+        compartment_rows = [row for row in referenced_rows if row.get("compartment_key") == key]
+        if not count.get("report_level") or not compartment_rows:
+            no_reference_compartments.append(label)
+            continue
+        above_rows = [row for row in compartment_rows if row.get("report_level_status") == "acima"]
+        if above_rows:
+            radionuclides = ", ".join(sorted({str(row.get("radionuclide")) for row in above_rows}))
+            exception_compartments.append(f"{label} ({radionuclides})")
+        else:
+            below_compartments.append(label)
+
+    sorted_contributors = sorted(
+        referenced_rows,
+        key=lambda row: float(row.get("report_level_p95_ratio") or 0.0),
+        reverse=True,
+    )
+    contributor_rows = [
+        {
+            "radionuclide": row.get("radionuclide") or "",
+            "compartment": row.get("compartment") or "",
+            "p95_text": row.get("p95_text") or "—",
+            "report_level_text": row.get("report_level_text") or "—",
+            "p95_report_level_ratio_text": row.get("report_level_p95_ratio_text") or "—",
+            "status": row.get("report_level_status") or "—",
+            "exceedance_rate_text": row.get("report_level_exceedance_rate_text") or "—",
+        }
+        for row in sorted_contributors[:5]
+    ]
+    below_contributors = [
+        row
+        for row in sorted_contributors
+        if row.get("report_level_status") == "abaixo"
+    ][:3]
+
+    cs137_sediment_row = next(
+        (
+            row
+            for row in modeled_rows
+            if row.get("radionuclide") == "Cs-137" and row.get("compartment_key") == "sediment"
+        ),
+        {},
+    )
+    cs137_sediment = {
+        "radionuclide": cs137_sediment_row.get("radionuclide") or "Cs-137",
+        "compartment": cs137_sediment_row.get("compartment") or "Sedimento",
+        "n": cs137_sediment_row.get("n") or 0,
+        "p95_text": cs137_sediment_row.get("p95_text") or "—",
+        "report_level_text": cs137_sediment_row.get("report_level_text") or "—",
+        "p95_report_level_ratio_text": cs137_sediment_row.get("report_level_p95_ratio_text") or "—",
+        "exceedance_count": cs137_sediment_row.get("report_level_exceedance_count") or 0,
+        "exceedance_rate_text": cs137_sediment_row.get("report_level_exceedance_rate_text") or "—",
+        "lld_text": cs137_sediment_row.get("lld_text") or "—",
+        "lld_p95_ratio_text": cs137_sediment_row.get("lld_p95_ratio_text") or "—",
+        "lld_exceedance_rate_text": cs137_sediment_row.get("lld_exceedance_rate_text") or "—",
+    }
+
+    generated_erica_count = sum(
+        1 for row in review.get("erica_pair_rows") or [] if row.get("erica_generated")
+    )
+    unmodeled = list(empirical.get("unmodeled_radionuclides") or [])
+    has_censored = any(int(row.get("censored_count") or 0) > 0 for row in empirical.get("radionuclide_rows") or [])
+
+    below_text = (
+        f"{' e '.join(below_compartments)} ficaram abaixo do Report Level nos radionuclídeos com referência disponível."
+        if below_compartments
+        else "Nenhum compartimento com Report Level disponível ficou integralmente abaixo da referência."
+    )
+    if exception_compartments:
+        below_text += f" A exceção observada foi {', '.join(exception_compartments)}, que exige leitura específica."
+    if no_reference_compartments:
+        below_text += (
+            f" {', '.join(no_reference_compartments)} não deve ser declarado como abaixo do Report Level quando não há "
+            "referência cadastrada para o compartimento ou radionuclídeo."
+        )
+
+    below_contributor_text = "; ".join(
+        f"{row.get('radionuclide')} em {row.get('compartment')} (P95/RL = {row.get('report_level_p95_ratio_text')})"
+        for row in below_contributors
+    )
+    contributor_text = (
+        "A maior contribuição relativa frente ao Report Level foi Cs-137 em sedimento, porque é o único contraste "
+        f"com P95/RL acima de 1. Entre os resultados ainda abaixo do limite, os maiores valores relativos foram "
+        f"{below_contributor_text}."
+        if below_contributor_text
+        else (
+            "A maior contribuição relativa frente ao Report Level foi Cs-137 em sedimento. Não houve outros "
+            "contrastes referenciados abaixo do limite com razão P95/RL disponível."
+        )
+    )
+
+    cs137_text = (
+        "O caso específico de Cs-137 em sedimento concentra a principal ressalva normativa: "
+        f"P95 = {cs137_sediment['p95_text']}, Report Level = {cs137_sediment['report_level_text']}, "
+        f"P95/RL = {cs137_sediment['p95_report_level_ratio_text']} e frequência de ultrapassagem de "
+        f"{cs137_sediment['exceedance_rate_text']} ({cs137_sediment['exceedance_count']} amostras). "
+        "Esse achado não invalida automaticamente os demais compartimentos, mas impede uma conclusão global sem "
+        "ressalvas para sedimento."
+    )
+
+    limitations = [
+        "Valores censurados < MDA> entram nas contagens de não detectados, mas não entram como valor numérico no denominador das frações Si."
+        if has_censored
+        else "Não foram identificados valores censurados < MDA> no subconjunto usado para a discussão.",
+        "Há ausência de Report Level para alguns compartimentos e radionuclídeos; nesses casos, a tabela informa sem referência e não permite classificar o resultado como abaixo ou acima.",
+        (
+            f"O radionuclídeo observado não modelado foi {', '.join(unmodeled)}, pois não há linha equivalente na fórmula da planilha TAR atual."
+            if unmodeled
+            else "Não houve radionuclídeo observado fora do conjunto modelado pela planilha TAR atual."
+        ),
+        (
+            f"A comparação com ERICA contém {generated_erica_count} valor(es) gerado(s) por stat_seed e marcado(s) com asterisco; esses pares tornam a leitura exploratória."
+            if generated_erica_count
+            else "Nesta execução, a comparação calculado x ERICA não dependeu de valores ERICA gerados por stat_seed; quando houver asterisco, a leitura deve ser exploratória."
+        ),
+    ]
+
+    definitions = [
+        {
+            "label": "Resultado calculado",
+            "text": "valor obtido por fórmulas da planilha TAR, aplicando frações Si, vazão, fatores de bioacumulação e transferência para os compartimentos ambientais.",
+        },
+        {
+            "label": "Resultado observado",
+            "text": "medição registrada nas planilhas de atividade do TAR, incluindo detectados, censurados < MDA> e radionuclídeos observados que podem não existir no modelo.",
+        },
+        {
+            "label": "Referência fixa",
+            "text": "Report Level ou LLD cadastrado para comparação; não é amostra aleatória, não é estimado pelo teste estatístico e deve ser interpretado conforme sua função normativa ou de detecção.",
+        },
+    ]
+
+    conclusion = {
+        "method": (
+            "O método cruzou a atividade total do tanque com a composição radionuclídica por data, selecionou janelas "
+            "temporais próximas, calculou concentrações por fórmula em água, peixe, invertebrado e sedimento, e comparou "
+            "os resultados com ERICA Tool, Report Level e LLD."
+        ),
+        "findings": (
+            "Os resultados referenciados ficaram majoritariamente abaixo do Report Level, especialmente em água e peixe. "
+            "A exceção relevante foi Cs-137 em sedimento, com P95/RL acima de 1 e frequência de ultrapassagem mensurável."
+        ),
+        "radiological_implication": (
+            "A implicação radiológica é de ausência de evidência de ultrapassagem ampla nos compartimentos referenciados, "
+            "mas com necessidade de tratar sedimento para Cs-137 como achado específico de atenção."
+        ),
+        "caveats": (
+            "A conclusão permanece condicionada aos valores censurados, às lacunas de referência, aos pares ERICA gerados "
+            "quando existirem e ao radionuclídeo observado não modelado."
+        ),
+        "recommendation": (
+            f"{inferential_assessment.get('recommended_action') or 'Manter a coleta de amostras independentes e ampliar a rastreabilidade dos dados.'} "
+            "Também se recomenda revisar referências ausentes e aprofundar a avaliação de Cs-137 em sedimento."
+        ),
+    }
+
+    return {
+        "section_title": "Discussão interpretativa",
+        "report_level_text": below_text,
+        "contributor_text": contributor_text,
+        "contributor_rows": contributor_rows,
+        "cs137_sediment": cs137_sediment,
+        "cs137_sediment_text": cs137_text,
+        "limitations": limitations,
+        "definitions": definitions,
+        "conclusion": conclusion,
+        "inferential_status": inferential_assessment.get("status") or "",
+        "inferential_reason": inferential_assessment.get("reason") or "",
+    }
+
+
 def load_tar_workbook_model(
     workbook_path: str | Path,
     *,
@@ -2710,6 +2901,7 @@ def build_tar_summary(
     )
     scenario_model["sensitivity"] = {}
     inferential_assessment = _empirical_inferential_assessment(scenario_model["empirical_activity_statistics"])
+    discussion = _build_discussion_summary(scenario_model, inferential_assessment)
     return {
         "ok": True,
         "workbook_path": model["workbook_path"],
@@ -2722,4 +2914,5 @@ def build_tar_summary(
         ],
         "scenario": scenario_model,
         "inferential_assessment": inferential_assessment,
+        "discussion": discussion,
     }

@@ -158,6 +158,60 @@ def _add_docx_table_notes(document: Any, table_key: str, *, note: str = "", sour
             document.add_paragraph(f"{index}. {column_note}")
 
 
+def _add_docx_discussion_section(document: Any, summary: dict[str, Any]) -> None:
+    discussion = summary.get("discussion") or {}
+    conclusion = discussion.get("conclusion") or {}
+    limitations = discussion.get("limitations") or []
+    definitions = discussion.get("definitions") or []
+    cs137 = discussion.get("cs137_sediment") or {}
+
+    document.add_heading("Discussão e conclusão", level=1)
+    if not discussion:
+        document.add_paragraph(summary["inferential_assessment"]["reason"])
+    else:
+        document.add_heading("Discussão interpretativa", level=2)
+        document.add_paragraph(discussion.get("report_level_text") or "")
+        document.add_heading("Radionuclídeos com maior contribuição", level=2)
+        document.add_paragraph(discussion.get("contributor_text") or "")
+        document.add_heading("Caso Cs-137 em sedimento", level=2)
+        document.add_paragraph(discussion.get("cs137_sediment_text") or "")
+        document.add_paragraph(
+            "Resumo numérico do caso: "
+            f"n = {cs137.get('n') or 0}; P95 = {cs137.get('p95_text') or '—'}; "
+            f"Report Level = {cs137.get('report_level_text') or '—'}; "
+            f"P95/RL = {cs137.get('p95_report_level_ratio_text') or '—'}; "
+            f"frequência de ultrapassagem = {cs137.get('exceedance_rate_text') or '—'}."
+        )
+        document.add_heading("Limitações da análise", level=2)
+        for item in limitations:
+            document.add_paragraph(str(item), style="List Bullet")
+        document.add_heading("Resultado calculado, observado e referência fixa", level=2)
+        for item in definitions:
+            document.add_paragraph(f"{item.get('label')}: {item.get('text')}", style="List Bullet")
+        document.add_heading("Conclusão objetiva", level=2)
+        document.add_paragraph(f"Síntese do método: {conclusion.get('method') or ''}")
+        document.add_paragraph(f"Principais achados: {conclusion.get('findings') or ''}")
+        document.add_paragraph(f"Implicação radiológica: {conclusion.get('radiological_implication') or ''}")
+        document.add_paragraph(f"Ressalvas: {conclusion.get('caveats') or ''}")
+        document.add_paragraph(f"Recomendação: {conclusion.get('recommendation') or ''}")
+        document.add_paragraph(
+            f"Suficiência estatística: {discussion.get('inferential_status') or ''}: "
+            f"{discussion.get('inferential_reason') or ''}"
+        )
+
+    _add_docx_table_intro(document, "minimums")
+    minimums = document.add_table(rows=1, cols=3)
+    minimums.style = "Table Grid"
+    for index, header in enumerate(["Teste", "Mínimo técnico", "Recomendado para relatório"]):
+        minimums.rows[0].cells[index].text = header
+    for item in INFERENTIAL_TEST_MINIMUMS:
+        cells = minimums.add_row().cells
+        cells[0].text = item["test"]
+        cells[1].text = item["technical_minimum"]
+        cells[2].text = item["recommended"]
+    _add_docx_table_notes(document, "minimums", note=DETERMINISTIC_N_NOTE)
+
+
 def _append_pdf_table_intro(story: list[Any], table_key: str, body_style: Any, caption_style: Any) -> None:
     from reportlab.platypus import Paragraph
 
@@ -1196,19 +1250,7 @@ def build_tar_docx_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
 
     _add_docx_sensitivity_section(document, scenario.get("sensitivity") or {})
 
-    document.add_heading("Suficiência estatística", level=1)
-    document.add_paragraph(summary["inferential_assessment"]["reason"])
-    _add_docx_table_intro(document, "minimums")
-    minimums = document.add_table(rows=1, cols=3)
-    minimums.style = "Table Grid"
-    for index, header in enumerate(["Teste", "Mínimo técnico", "Recomendado para relatório"]):
-        minimums.rows[0].cells[index].text = header
-    for item in INFERENTIAL_TEST_MINIMUMS:
-        cells = minimums.add_row().cells
-        cells[0].text = item["test"]
-        cells[1].text = item["technical_minimum"]
-        cells[2].text = item["recommended"]
-    _add_docx_table_notes(document, "minimums", note=DETERMINISTIC_N_NOTE)
+    _add_docx_discussion_section(document, summary)
 
     output = BytesIO()
     document.save(output)
@@ -2001,13 +2043,57 @@ def build_tar_pdf_payload(summary: dict[str, Any]) -> tuple[bytes, str, str]:
         )
         story.append(Spacer(1, 8))
 
-    story.extend(
-        [
-            Paragraph("Discussão e conclusão", subheading_style),
-            Paragraph(summary["inferential_assessment"]["reason"], body_style),
-            Spacer(1, 8),
-        ]
-    )
+    discussion = summary.get("discussion") or {}
+    conclusion = discussion.get("conclusion") or {}
+    cs137 = discussion.get("cs137_sediment") or {}
+    story.append(Paragraph("Discussão e conclusão", subheading_style))
+    if not discussion:
+        story.append(Paragraph(summary["inferential_assessment"]["reason"], body_style))
+    else:
+        story.extend(
+            [
+                Paragraph("Discussão interpretativa", caption_style),
+                Paragraph(_pdf_text(discussion.get("report_level_text") or ""), body_style),
+                Paragraph("Radionuclídeos com maior contribuição", caption_style),
+                Paragraph(_pdf_text(discussion.get("contributor_text") or ""), body_style),
+                Paragraph("Caso Cs-137 em sedimento", caption_style),
+                Paragraph(_pdf_text(discussion.get("cs137_sediment_text") or ""), body_style),
+                Paragraph(
+                    _pdf_text(
+                        "Resumo numérico do caso: "
+                        f"n = {cs137.get('n') or 0}; P95 = {cs137.get('p95_text') or '—'}; "
+                        f"Report Level = {cs137.get('report_level_text') or '—'}; "
+                        f"P95/RL = {cs137.get('p95_report_level_ratio_text') or '—'}; "
+                        f"frequência de ultrapassagem = {cs137.get('exceedance_rate_text') or '—'}."
+                    ),
+                    body_style,
+                ),
+                Paragraph("Limitações da análise", caption_style),
+            ]
+        )
+        for item in discussion.get("limitations") or []:
+            story.append(Paragraph(_pdf_text(f"- {item}"), body_style))
+        story.append(Paragraph("Resultado calculado, observado e referência fixa", caption_style))
+        for item in discussion.get("definitions") or []:
+            story.append(Paragraph(_pdf_text(f"- {item.get('label')}: {item.get('text')}"), body_style))
+        story.extend(
+            [
+                Paragraph("Conclusão objetiva", caption_style),
+                Paragraph(_pdf_text(f"Síntese do método: {conclusion.get('method') or ''}"), body_style),
+                Paragraph(_pdf_text(f"Principais achados: {conclusion.get('findings') or ''}"), body_style),
+                Paragraph(_pdf_text(f"Implicação radiológica: {conclusion.get('radiological_implication') or ''}"), body_style),
+                Paragraph(_pdf_text(f"Ressalvas: {conclusion.get('caveats') or ''}"), body_style),
+                Paragraph(_pdf_text(f"Recomendação: {conclusion.get('recommendation') or ''}"), body_style),
+                Paragraph(
+                    _pdf_text(
+                        f"Suficiência estatística: {discussion.get('inferential_status') or ''}: "
+                        f"{discussion.get('inferential_reason') or ''}"
+                    ),
+                    body_style,
+                ),
+            ]
+        )
+    story.append(Spacer(1, 8))
     _append_pdf_table_intro(story, "minimums", body_style, caption_style)
 
     minimum_rows = [["Teste", "Mínimo técnico", "Recomendado para relatório"]]

@@ -1873,6 +1873,8 @@ def _base_html(title: str, body: str) -> str:
     h3 {{ margin-top: 18px; font-size: 12.5pt; line-height: 1.25; }}
     p {{ line-height: 1.42; margin: 8px 0; }}
     .panel p, .article-text p, .explain-text, .table-note, .column-notes li, .toc-list p, .toc-children span {{ text-align: justify; }}
+    .text-list {{ margin: 0 0 14px 20px; padding: 0; }}
+    .text-list li {{ margin: 0 0 8px; text-align: justify; }}
     section[id], article[id] {{ scroll-margin-top: 18px; }}
     .scenario-tabs {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .scenario-tab {{ display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; color: #22675f; text-decoration: none; background: #fff; font-size: 10.5pt; }}
@@ -2151,11 +2153,65 @@ def _article_toc_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
         )
     items.extend(
         [
-            _toc_item("suficiencia-estatistica", "Suficiência estatística", "Leitura das limitações estatísticas do conjunto."),
+            _toc_item("suficiencia-estatistica", "Discussão e conclusão", "Interpretação dos achados, limitações e conclusão objetiva."),
             _toc_item("acoes", "Ações", "Atalhos para retornar ao TAR ou abrir o relatório."),
         ]
     )
     return items
+
+
+def _discussion_panel(summary: dict[str, Any]) -> str:
+    scenario = summary["scenario"]
+    discussion = summary.get("discussion") or {}
+    conclusion = discussion.get("conclusion") or {}
+    limitations = discussion.get("limitations") or []
+    definitions = discussion.get("definitions") or []
+    cs137 = discussion.get("cs137_sediment") or {}
+    if not discussion:
+        assessment = summary["inferential_assessment"]
+        return f"""
+<section class="panel report-block" id="suficiencia-estatistica">
+  <h2>Discussão e conclusão</h2>
+  <p>{escape(assessment['reason'])}</p>
+  {_minimums_table()}
+</section>
+"""
+    limitations_html = "".join(f"<li>{escape(str(item))}</li>" for item in limitations)
+    definitions_html = "".join(
+        f"<li><strong>{escape(str(item.get('label') or ''))}:</strong> {escape(str(item.get('text') or ''))}</li>"
+        for item in definitions
+    )
+    generated_erica_note = (
+        "No cenário hipotético, a leitura deve ser tratada como demonstração do fluxo estatístico."
+        if scenario.get("is_hypothetical")
+        else "A interpretação abaixo usa os dados reais do TAR - Afluente calculados por fórmula e as referências fixas cadastradas."
+    )
+    return f"""
+<section class="panel report-block" id="suficiencia-estatistica">
+  <h2>Discussão e conclusão</h2>
+  <h3>Discussão interpretativa</h3>
+  <p>{escape(generated_erica_note)}</p>
+  <h3>Compartimentos e Report Level</h3>
+  <p>{escape(str(discussion.get('report_level_text') or ''))}</p>
+  <h3>Radionuclídeos com maior contribuição</h3>
+  <p>{escape(str(discussion.get('contributor_text') or ''))}</p>
+  <h3>Caso Cs-137 em sedimento</h3>
+  <p>{escape(str(discussion.get('cs137_sediment_text') or ''))}</p>
+  <p><strong>Resumo numérico do caso:</strong> n = {escape(str(cs137.get('n') or 0))}; P95 = {escape(str(cs137.get('p95_text') or '—'))}; Report Level = {escape(str(cs137.get('report_level_text') or '—'))}; P95/RL = {escape(str(cs137.get('p95_report_level_ratio_text') or '—'))}; frequência de ultrapassagem = {escape(str(cs137.get('exceedance_rate_text') or '—'))}.</p>
+  <h3>Limitações da análise</h3>
+  <ul class="text-list">{limitations_html}</ul>
+  <h3>Resultado calculado, observado e referência fixa</h3>
+  <ul class="text-list">{definitions_html}</ul>
+  <h3>Conclusão objetiva</h3>
+  <p><strong>Síntese do método:</strong> {escape(str(conclusion.get('method') or ''))}</p>
+  <p><strong>Principais achados:</strong> {escape(str(conclusion.get('findings') or ''))}</p>
+  <p><strong>Implicação radiológica:</strong> {escape(str(conclusion.get('radiological_implication') or ''))}</p>
+  <p><strong>Ressalvas:</strong> {escape(str(conclusion.get('caveats') or ''))}</p>
+  <p><strong>Recomendação:</strong> {escape(str(conclusion.get('recommendation') or ''))}</p>
+  <p><strong>Suficiência estatística:</strong> {escape(str(discussion.get('inferential_status') or ''))}: {escape(str(discussion.get('inferential_reason') or ''))}</p>
+  {_minimums_table()}
+</section>
+"""
 
 
 def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
@@ -2212,11 +2268,7 @@ def render_tar_dashboard_html(summary: dict[str, Any]) -> str:
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel report-block" id="suficiencia-estatistica">
-  <h2>Discussão e conclusão</h2>
-  <p>{escape(assessment['reason']) if not scenario.get('is_hypothetical') else 'No cenário hipotético, as medições sintéticas permitem aplicar teste inferencial sobre as razões simulado/Report Level. Para dados reais, a validade do teste depende de medições independentes da água do TAR.'}</p>
-  {_minimums_table()}
-</section>
+{_discussion_panel(summary)}
 """
     return _base_html("Módulo TAR", body)
 
@@ -2258,11 +2310,7 @@ def render_tar_report_html(summary: dict[str, Any]) -> str:
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel report-block" id="suficiencia-estatistica">
-  <h2>Discussão e conclusão</h2>
-  <p>{escape(assessment['status'])}: {escape(assessment['reason']) if not scenario.get('is_hypothetical') else 'O cenário hipotético usa medições sintéticas apenas para demonstrar o fluxo estatístico. Para conclusão real, as medições devem vir da espectrometria gama das amostras da água do TAR.'}</p>
-  {_minimums_table()}
-</section>
+{_discussion_panel(summary)}
 <section class="panel report-block" id="exportacao">
   <h2>Exportação</h2>
   <div class="actions">
@@ -2402,11 +2450,7 @@ def render_tar_article_beta_html(summary: dict[str, Any], article_path: str | Pa
 {_hypothetical_panel(summary)}
 {_empirical_activity_panel(summary)}
 {_statistical_comparison_panel(summary)}
-<section class="panel report-block" id="suficiencia-estatistica">
-  <h2>Discussão e conclusão</h2>
-  <p>{escape(summary['inferential_assessment']['status'])}: {escape(summary['inferential_assessment']['reason']) if not scenario.get('is_hypothetical') else 'O cenário hipotético usa medições sintéticas apenas para demonstrar o fluxo estatístico. Para conclusão real, as medições devem vir da espectrometria gama das amostras da água do TAR.'}</p>
-  {_minimums_table()}
-</section>
+{_discussion_panel(summary)}
 <section class="panel report-block" id="acoes">
   <h2>Ações</h2>
   <div class="actions">
