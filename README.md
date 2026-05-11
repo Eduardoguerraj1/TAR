@@ -47,6 +47,8 @@ O deploy usa `render.yaml`:
 python serve.py
 ```
 
+A versão do Python é fixada em `.python-version` como `3.11.9` para usar wheels binários de `scipy==1.14.1`. Sem essa fixação, o Render pode usar Python 3.14 e tentar compilar SciPy a partir do código-fonte.
+
 Variáveis esperadas:
 
 - `TAR_WORKBOOK_PATH=./Cópia de TAR.xlsx`
