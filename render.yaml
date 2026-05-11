@@ -5,7 +5,7 @@ services:
     plan: free
     autoDeploy: true
     healthCheckPath: /healthz
-    buildCommand: pip install -r requirements.txt
+    buildCommand: bash build_render.sh
     startCommand: python serve.py
     envVars:
       - key: PYTHON_VERSION
