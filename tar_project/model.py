@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
-from scipy import stats
+
+
+class _LazyScipyStats:
+    def __getattr__(self, name: str) -> Any:
+        from scipy import stats as scipy_stats
+
+        return getattr(scipy_stats, name)
+
+
+stats = _LazyScipyStats()
 
 
 class TarWorkbookError(RuntimeError):

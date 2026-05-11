@@ -44,7 +44,7 @@ http://127.0.0.1:5000/
 O deploy usa `render.yaml`:
 
 ```text
-waitress-serve --host=0.0.0.0 --port=$PORT wsgi:application
+python serve.py
 ```
 
 Variáveis esperadas:
