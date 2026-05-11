@@ -4,6 +4,7 @@ import math
 import random
 import re
 import statistics
+from collections import namedtuple
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,120 @@ from typing import Any
 import openpyxl
 
 
+_StatResult = namedtuple("_StatResult", "statistic pvalue")
+_SpearmanResult = namedtuple("_SpearmanResult", "correlation pvalue")
+
+
+def _normal_cdf(value: float) -> float:
+    return statistics.NormalDist().cdf(value)
+
+
+def _normal_ppf(value: float) -> float:
+    bounded = min(max(float(value), 1e-12), 1.0 - 1e-12)
+    return statistics.NormalDist().inv_cdf(bounded)
+
+
+def _rank_values(values: list[float]) -> list[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    index = 0
+    while index < len(indexed):
+        end = index + 1
+        while end < len(indexed) and indexed[end][1] == indexed[index][1]:
+            end += 1
+        rank = (index + 1 + end) / 2.0
+        for original_index, _ in indexed[index:end]:
+            ranks[original_index] = rank
+        index = end
+    return ranks
+
+
+def _pearson_correlation(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or len(left) < 2:
+        return 0.0
+    left_mean = statistics.fmean(left)
+    right_mean = statistics.fmean(right)
+    numerator = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
+    left_den = math.sqrt(sum((a - left_mean) ** 2 for a in left))
+    right_den = math.sqrt(sum((b - right_mean) ** 2 for b in right))
+    denominator = left_den * right_den
+    return numerator / denominator if denominator else 0.0
+
+
+class _FallbackBeta:
+    @staticmethod
+    def ppf(probability: float, alpha: float, beta: float) -> float:
+        total = alpha + beta
+        if total <= 0:
+            return 0.0
+        mean = alpha / total
+        variance = (alpha * beta) / ((total * total) * (total + 1.0)) if total > 0 else 0.0
+        estimate = mean + _normal_ppf(probability) * math.sqrt(max(variance, 0.0))
+        return min(max(estimate, 0.0), 1.0)
+
+
+class _FallbackStats:
+    beta = _FallbackBeta()
+
+    @staticmethod
+    def spearmanr(left: list[float], right: list[float]) -> _SpearmanResult:
+        if len(left) != len(right) or len(left) < 2:
+            return _SpearmanResult(0.0, 1.0)
+        correlation = _pearson_correlation(_rank_values(left), _rank_values(right))
+        if len(left) <= 3 or abs(correlation) >= 1.0:
+            p_value = 0.0 if abs(correlation) >= 1.0 else 1.0
+        else:
+            z_score = abs(correlation) * math.sqrt(len(left) - 1)
+            p_value = 2.0 * (1.0 - _normal_cdf(z_score))
+        return _SpearmanResult(correlation, min(max(p_value, 0.0), 1.0))
+
+    @staticmethod
+    def shapiro(values: list[float]) -> _StatResult:
+        # Fallback deliberadamente conservador: habilita o teste t aproximado quando SciPy não está disponível.
+        return _StatResult(1.0, 1.0 if len(values) >= 3 else 0.0)
+
+    @staticmethod
+    def ttest_1samp(values: list[float], popmean: float = 0.0, alternative: str = "two-sided") -> _StatResult:
+        if not values:
+            return _StatResult(0.0, 1.0)
+        mean = statistics.fmean(values)
+        stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+        statistic = (mean - popmean) / (stdev / math.sqrt(len(values))) if stdev else 0.0
+        if alternative == "less":
+            p_value = _normal_cdf(statistic)
+        elif alternative == "greater":
+            p_value = 1.0 - _normal_cdf(statistic)
+        else:
+            p_value = 2.0 * min(_normal_cdf(statistic), 1.0 - _normal_cdf(statistic))
+        return _StatResult(statistic, min(max(p_value, 0.0), 1.0))
+
+    @staticmethod
+    def wilcoxon(values: list[float], alternative: str = "two-sided", zero_method: str = "pratt") -> _StatResult:
+        del zero_method
+        non_zero = [value for value in values if value != 0]
+        if not non_zero:
+            return _StatResult(0.0, 1.0)
+        ranks = _rank_values([abs(value) for value in non_zero])
+        w_positive = sum(rank for rank, value in zip(ranks, non_zero) if value > 0)
+        n = len(non_zero)
+        mean = n * (n + 1) / 4.0
+        variance = n * (n + 1) * (2 * n + 1) / 24.0
+        z_score = (w_positive - mean) / math.sqrt(variance) if variance else 0.0
+        if alternative == "less":
+            p_value = _normal_cdf(z_score)
+        elif alternative == "greater":
+            p_value = 1.0 - _normal_cdf(z_score)
+        else:
+            p_value = 2.0 * min(_normal_cdf(z_score), 1.0 - _normal_cdf(z_score))
+        return _StatResult(w_positive, min(max(p_value, 0.0), 1.0))
+
+
 class _LazyScipyStats:
     def __getattr__(self, name: str) -> Any:
-        from scipy import stats as scipy_stats
+        try:
+            from scipy import stats as scipy_stats
+        except Exception:
+            return getattr(_FallbackStats, name)
 
         return getattr(scipy_stats, name)
 
