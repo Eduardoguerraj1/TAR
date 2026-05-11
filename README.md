@@ -47,7 +47,7 @@ O deploy usa `render.yaml`:
 python serve.py
 ```
 
-A versão do Python é fixada em `.python-version` como `3.11.9` para usar wheels binários de `scipy==1.14.1`. Sem essa fixação, o Render pode usar Python 3.14 e tentar compilar SciPy a partir do código-fonte.
+A versão do Python é fixada em `.python-version` como `3.11.9`. O `requirements.txt` também tem marcadores para Python 3.14, usando `numpy==2.3.5` e `scipy==1.17.1`, que têm wheels binários para evitar compilação com Fortran no Render.
 
 Variáveis esperadas:
 
